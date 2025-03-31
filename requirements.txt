@@ -1,22 +1,3 @@
-# Базовый образ Python
-FROM python:3.12-slim
-
-# Установка FFmpeg (необходимо для работы с аудиофайлами)
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
-
-# Создание рабочей директории
-WORKDIR /app
-
-# Копирование зависимостей
-COPY requirements.txt .
-
-# Установка зависимостей
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Копирование кода
-COPY . .
-
-# Запуск бота
-CMD ["python", "bot.py"]
+python-telegram-bot==20.5
+requests==2.31.0
+pydub==0.25.1
