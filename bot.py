@@ -1,3 +1,4 @@
+import uuid
 import os
 import io
 import logging
@@ -5,7 +6,7 @@ import tempfile
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-from moviepy.editor import AudioFileClip
+from pydub import AudioSegment
 from difflib import get_close_matches
 
 # Настройка логирования
@@ -61,7 +62,7 @@ def get_access_token():
         logger.error(f"Ошибка при отправке запроса на получение токена: {e}")
 
 # Распознавание текста через Sber SmartSpeech
-def recognize_audio(audio_path: str) -> str:
+def recognize_audio(audio_data: io.BytesIO) -> str:
     global SALUTE_SPEECH_TOKEN
     if not SALUTE_SPEECH_TOKEN:
         get_access_token()
@@ -73,8 +74,7 @@ def recognize_audio(audio_path: str) -> str:
         "Accept": "application/json",
     }
     try:
-        with open(audio_path, "rb") as audio_file:
-            response = requests.post(url, headers=headers, data=audio_file.read(), verify=False)
+        response = requests.post(url, headers=headers, data=audio_data.read(), verify=False)
         if response.status_code == 200:
             result = response.json()
             if "result" in result:
@@ -92,71 +92,181 @@ def find_closest_artist(text: str) -> str:
     matches = get_close_matches(text, KNOWN_ARTISTS, n=1, cutoff=0.6)
     return matches[0] if matches else None
 
+def convert_ogg_to_mp3(ogg_data: io.BytesIO) -> io.BytesIO:
+    try:
+        logger.info("Начинаем конвертацию OGG в MP3")
+        audio = AudioSegment.from_ogg(ogg_data)
+        mp3_data = io.BytesIO()
+        audio.export(mp3_data, format="mp3")
+        mp3_data.seek(0)
+        logger.info("Конвертация OGG в MP3 завершена успешно")
+        return mp3_data
+    except Exception as e:
+        logger.error(f"Ошибка при конвертации OGG в MP3: {e}")
+        return None
+    
+    
 # Обработка входящих аудиосообщений (голосовые)
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Получаем файл голосового сообщения
         voice_file = await update.message.voice.get_file()
         ogg_data = io.BytesIO()
         await voice_file.download_to_memory(out=ogg_data)
         ogg_data.seek(0)
 
-        # Сохраняем во временный файл
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_ogg:
-            temp_ogg.write(ogg_data.read())
-            temp_ogg_path = temp_ogg.name
-
-        # Конвертируем в MP3
-        mp3_path = convert_ogg_to_mp3(temp_ogg_path)
-        if not mp3_path:
+        # Конвертируем OGG в MP3
+        mp3_data = convert_ogg_to_mp3(ogg_data)
+        if not mp3_data:
             await update.message.reply_text("Ошибка при конвертации аудио.")
             return
 
         # Обрабатываем аудио
-        await process_audio(mp3_path, update, context)
-
+        await process_audio(mp3_data, update, context)
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {e}")
         await update.message.reply_text("Произошла ошибка при обработке аудио.")
 
+
 # Обработка входящих аудиосообщений (MP3)
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Получаем файл аудио
+        # Получаем аудиофайл
         audio_file = await update.message.audio.get_file()
         mp3_data = io.BytesIO()
         await audio_file.download_to_memory(out=mp3_data)
         mp3_data.seek(0)
 
-        # Сохраняем во временный файл
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_mp3:
-            temp_mp3.write(mp3_data.read())
-            temp_mp3_path = temp_mp3.name
-
         # Обрабатываем аудио
-        await process_audio(temp_mp3_path, update, context)
+        await process_music(mp3_data, update, context)
 
     except Exception as e:
         logger.error(f"Ошибка при обработке аудиофайла: {e}")
         await update.message.reply_text("Произошла ошибка при обработке аудио.")
 
-# Конвертация OGG в MP3
-def convert_ogg_to_mp3(ogg_path: str) -> str:
+# Обработка текстовых сообщений
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        mp3_path = ogg_path.replace(".ogg", ".mp3")
-        audio_clip = AudioFileClip(ogg_path)
-        audio_clip.write_audiofile(mp3_path, codec="libmp3lame")
-        audio_clip.close()
-        return mp3_path
-    except Exception as e:
-        logger.error(f"Ошибка при конвертации аудио: {e}")
-        return None
+        # Получаем текст сообщения
+        text = update.message.text.lower()
 
+        # Удаляем символы и приводим к нижнему регистру
+        clean_text = ''.join(e for e in text if e.isalnum() or e.isspace())
+
+        # Разделяем текст на слова
+        words = clean_text.split()
+
+        # Проверяем совпадения с библиотекой имён
+        for word in words:
+            closest_artist = find_closest_artist(word)
+            if closest_artist:
+                # Отправляем результат в группу и закрепляем сообщение
+                message = await context.bot.send_message(chat_id=TARGET_GROUP_ID, text=f"🌟 Совпадение: {closest_artist}")
+                await message.pin()
+                break
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке текстового сообщения: {e}")
+        await update.message.reply_text("Произошла ошибка при обработке текста.")
+
+# Обрезка аудио
+def trim_audio(audio_data: io.BytesIO, start_time: int, end_time: int) -> io.BytesIO:
+    try:
+        # Проверяем входные данные
+        if audio_data.getbuffer().nbytes == 0:
+            logger.error("Входные данные пусты.")
+            return None
+
+        logger.debug(f"Первые 100 байт данных: {audio_data.getvalue()[:100]}")
+
+        # Читаем аудио из потока с указанием формата
+        audio = AudioSegment.from_file(audio_data, format="ogg")  # Для OGG файлов
+        logger.info(f"Длительность исходного аудио: {len(audio)} мс")
+        
+        # Обрезаем аудио
+        trimmed_audio = audio[start_time:end_time]
+        
+        # Экспортируем обрезанное аудио обратно в поток
+        output = io.BytesIO()
+        trimmed_audio.export(output, format="mp3")
+        output.seek(0)
+        logger.info("Обрезка аудио завершена успешно")
+        return output
+    except Exception as e:
+        logger.error(f"Ошибка при обрезке аудио: {e}")
+        return None
+    
+async def process_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Получаем аудиофайл
+        audio_file = await update.message.audio.get_file()
+        audio_data = io.BytesIO()
+        await audio_file.download_to_memory(audio_data)
+        audio_data.seek(0)
+
+        # Проверяем входные данные
+        if audio_data.getbuffer().nbytes == 0:
+            logger.error("Входные данные пусты.")
+            await update.message.reply_text("Аудиофайл пуст.")
+            return
+
+        logger.debug(f"Первые 100 байт данных: {audio_data.getvalue()[:100]}")
+
+        # Ищем фразу "звезда часа"
+        trigger_time = find_trigger_in_audio(audio_data)
+        if not trigger_time:
+            await update.message.reply_text("Фраза 'звезда часа' не найдена.")
+            return
+
+        # Обрезаем аудио (2-3 секунды после фразы)
+        trimmed_audio = trim_audio(audio_data, trigger_time, trigger_time + 3000)
+        if not trimmed_audio:
+            await update.message.reply_text("Ошибка при обрезке аудио.")
+            return
+
+        # Распознаем текст из обрезанного аудио
+        text = recognize_audio(trimmed_audio)
+        if not text:
+            await update.message.reply_text("Не удалось распознать текст.")
+            return
+
+        # Отправляем результаты
+        await send_trimmed_audio(update, context, trimmed_audio, text)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке аудио: {e}")
+        await update.message.reply_text("Произошла ошибка при обработке аудио.")
+    
 # Общая функция для обработки аудио
-async def process_audio(audio_path: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_audio(audio_data: io.BytesIO, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Ищем фразу "звезда часа"
+        trigger_time = find_trigger_in_audio(audio_data)
+        if not trigger_time:
+            await update.message.reply_text("Фраза 'звезда часа' не найдена.")
+            return
+
+        # Обрезаем аудио (2-3 секунды после фразы)
+        trimmed_audio = trim_audio(audio_data, trigger_time, trigger_time + 3000)  # Используем audio_data
+        if not trimmed_audio:
+            await update.message.reply_text("Ошибка при обрезке аудио.")
+            return
+
+        # Распознаем текст из обрезанного аудио
+        text = recognize_audio(trimmed_audio)
+        if not text:
+            await update.message.reply_text("Не удалось распознать текст.")
+            return
+
+        # Отправляем результаты
+        await send_trimmed_audio(update, context, trimmed_audio, text)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке аудио: {e}")
+        await update.message.reply_text("Произошла ошибка при обработке аудио.")
+
+# Обработка музыкального аудио
+async def process_music(audio_data: io.BytesIO, update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Распознаем текст
-        text = recognize_audio(audio_path)
+        text = recognize_audio(audio_data)
         if not text:
             await update.message.reply_text("Не удалось распознать текст.")
             return
@@ -165,75 +275,134 @@ async def process_audio(audio_path: str, update: Update, context: ContextTypes.D
         logger.info(f"Распознанный текст: {text}")
 
         # Ищем ключевые слова
-        if "звезда часа" in text.lower():
-            parts = text.lower().split("звезда часа")
-            if len(parts) > 1:
-                next_words = parts[1].strip().split()[:4]  # Берем до 4 слов
-                keyword = " ".join(next_words).title()
+        if isinstance(text, list):
+            text = " ".join(text)  # Преобразуем список в строку, если текст в виде списка
 
-                # Проверяем, является ли найденное слово известным исполнителем
-                closest_artist = find_closest_artist(keyword)
-                if closest_artist:
-                    # Отправляем результат в группу и закрепляем сообщение
-                    message = await context.bot.send_message(chat_id=TARGET_GROUP_ID, text=f"🌟 Звезда часа: {closest_artist}")
-                    await message.pin()
-                else:
-                    # Если не удалось найти исполнителя, отправляем обрезанное аудио
-                    await send_trimmed_audio(audio_path, update, context, text)
-        else:
-            await update.message.reply_text("Ключевая фраза 'звезда часа' не найдена.")
+        if "звезда часа" in text.lower():
+            # Конвертируем MP3 в OGG
+            ogg_data = convert_mp3_to_ogg(audio_data)
+            if not ogg_data:
+                await update.message.reply_text("Ошибка при конвертации аудио.")
+                return
+
+            # Отправляем голосовое сообщение
+            await context.bot.send_document(
+                chat_id=AUDIO_CHAT_ID,
+                document=mp3_data,
+                caption="/search"
+            )
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке аудио: {e}")
+        logger.error(f"Ошибка при обработке музыкального аудио: {e}")
         await update.message.reply_text("Произошла ошибка при обработке аудио.")
 
 # Отправка обрезанного аудио
-async def send_trimmed_audio(audio_path: str, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+# Отправка обрезанного аудио
+async def send_trimmed_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, audio_data: io.BytesIO, text: str):
     try:
-        # Обрезаем аудио (начиная с момента фразы "звезда часа" + 3 секунды)
-        trigger_time = find_trigger_in_audio(text)
-        trimmed_audio_path = trim_audio(audio_path, trigger_time, trigger_time + 3)
+        # Сохраняем обрезанное аудио во временный файл
+        temp_filename = f"trimmed_audio_{os.urandom(8).hex()}.ogg"
+        with open(temp_filename, "wb") as temp_file:
+            temp_file.write(audio_data.getvalue())
 
-        # Отправляем аудио в группу
-        with open(trimmed_audio_path, "rb") as audio_file:
-            await context.bot.send_audio(
-                chat_id=TARGET_GROUP_ID,
-                audio=audio_file,
-                caption="Я не понял, кто звезда часа. Прослушайте и напишите в чат 'звезда часа' и нужное имя."
+        # Отправляем голосовое сообщение с комментарием /search
+        with open(temp_filename, "rb") as audio_file:
+            await context.bot.send_voice(
+                chat_id=AUDIO_CHAT_ID,
+                voice=audio_file,
+                caption="/search"
             )
 
         # Удаляем временный файл
-        os.remove(trimmed_audio_path)
+        os.remove(temp_filename)
 
     except Exception as e:
         logger.error(f"Ошибка при отправке обрезанного аудио: {e}")
         await update.message.reply_text("Не удалось отправить обрезанное аудио.")
 
-# Поиск времени начала фразы "звезда часа"
-def find_trigger_in_audio(text: str) -> int:
-    words_before = text.lower().split("звезда часа")[0].split()
-    estimated_start_time = len(words_before) * 500  # Примерно 500 мс на слово
-    return estimated_start_time
-
-# Обрезка аудио
-def trim_audio(audio_path: str, start_time: int, end_time: int) -> str:
+# Обработка текстовых сообщений
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        trimmed_audio_path = audio_path.replace(".mp3", "_trimmed.mp3")
-        audio_clip = AudioFileClip(audio_path).subclip(start_time / 1000, end_time / 1000)
-        audio_clip.write_audiofile(trimmed_audio_path, codec="libmp3lame")
-        audio_clip.close()
-        return trimmed_audio_path
-    except Exception as e:
-        logger.error(f"Ошибка при обрезке аудио: {e}")
-        return None
+        # Получаем текст сообщения
+        text = update.message.text.lower()
 
+        # Удаляем символы и приводим к нижнему регистру
+        clean_text = ''.join(e for e in text if e.isalnum() or e.isspace())
+
+        # Разделяем текст на слова
+        words = clean_text.split()
+
+        # Проверяем совпадения с библиотекой имён
+        for word in words:
+            closest_artist = find_closest_artist(word)
+            if closest_artist:
+                # Отправляем результат в группу и закрепляем сообщение
+                message = await context.bot.send_message(chat_id=TARGET_GROUP_ID, text=f"🌟 Совпадение: {closest_artist}")
+                await message.pin()
+                break
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке текстового сообщения: {e}")
+        await update.message.reply_text("Произошла ошибка при обработке текста.")
+
+# Конвертация MP3 в OGG
+def convert_mp3_to_ogg(mp3_data: io.BytesIO) -> io.BytesIO:
+    try:
+        # Проверяем входные данные
+        if mp3_data.getbuffer().nbytes == 0:
+            logger.error("Входные данные пусты.")
+            return None
+
+        logger.debug(f"Первые 100 байт данных: {mp3_data.getvalue()[:100]}")
+
+        # Читаем аудио из потока с указанием формата
+        audio = AudioSegment.from_file(mp3_data, format="mp3")  # Для MP3 файлов
+        
+        # Конвертируем в OGG
+        ogg_data = io.BytesIO()
+        audio.export(ogg_data, format="ogg")
+        ogg_data.seek(0)
+        logger.info("Конвертация MP3 в OGG завершена успешно")
+        return ogg_data
+    except Exception as e:
+        logger.error(f"Ошибка при конвертации MP3 в OGG: {e}")
+        return None
+    
+# Основная функция для обработки аудио
+async def process_audio(audio_data: io.BytesIO, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Ищем фразу "звезда часа"
+        trigger_time = find_trigger_in_audio(audio_data)
+        if not trigger_time:
+            await update.message.reply_text("Фраза 'звезда часа' не найдена.")
+            return
+
+        # Обрезаем аудио (2-3 секунды после фразы)
+        trimmed_audio = trim_audio(audio_data, trigger_time, trigger_time + 3000)
+        if not trimmed_audio:
+            await update.message.reply_text("Ошибка при обрезке аудио.")
+            return
+
+        # Распознаем текст из обрезанного аудио
+        text = recognize_audio(trimmed_audio)
+        if not text:
+            await update.message.reply_text("Не удалось распознать текст.")
+            return
+
+        # Отправляем результаты
+        await send_trimmed_audio(update, context, trimmed_audio, text)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке аудио: {e}")
+        await update.message.reply_text("Произошла ошибка при обработке аудио.")
+        
 # Основная функция
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Обработчики
-    application.add_handler(MessageHandler(filters.VOICE, handle_voice))  # Голосовые сообщения
-    application.add_handler(MessageHandler(filters.AUDIO, handle_audio))  # Аудиофайлы
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Запуск бота
     application.run_polling()
