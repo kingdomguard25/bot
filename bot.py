@@ -1,5 +1,6 @@
 import uuid
 import os
+import tempfile
 import io
 import logging
 import requests
@@ -14,6 +15,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+AudioSegment.converter = r"/usr/bin/ffmpeg"
+AudioSegment.ffmpeg = r"/usr/bin/ffmpeg -nostdin"
 
 # Конфигурация
 BOT_TOKEN = "7816260297:AAFDjI4_Tvsm9k6t8uymdUGkwD5zSptiCJI"
@@ -59,6 +64,43 @@ def get_access_token():
             logger.error(f"Ошибка при получении токена: {response.status_code} - {response.text}")
     except Exception as e:
         logger.error(f"Ошибка при отправке запроса на получение токена: {e}")
+
+def check_audio_file(audio_data):
+    try:
+        audio = AudioSegment.from_mp3(audio_data)
+        logger.info("Аудиофайл успешно загружен и проверен.")
+    except Exception as e:
+        logger.error(f"Ошибка при проверке аудиофайла: {e}")
+
+# Пример использования
+audio_data = io.BytesIO()  # Замените на ваш аудиофайл
+check_audio_file(audio_data)
+
+import subprocess
+
+def run_ffmpeg_command(command):
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True
+        )
+        print("FFmpeg stdout:", result.stdout)
+        print("FFmpeg stderr:", result.stderr)
+    except subprocess.CalledProcessError as e:
+        print("FFmpeg error:", e.stderr)
+
+# Пример использования
+command = [
+    "/usr/bin/ffmpeg",
+    "-i", "input.mp3",
+    "-ss", "00:00:00",
+    "-to", "00:00:03",
+    "output.mp3"
+]
+run_ffmpeg_command(command)
 
 # Распознавание текста через Sber SmartSpeech
 def recognize_audio(audio_data: io.BytesIO) -> str:
@@ -175,8 +217,9 @@ async def send_trimmed_audio(update: Update, context: ContextTypes.DEFAULT_TYPE,
         trimmed_audio = audio_segment[-3000:]  # Последние 3 секунды
 
         # Сохраняем обрезанное аудио во временный файл
-        temp_filename = f"trimmed_audio_{os.urandom(8).hex()}.mp3"
-        trimmed_audio.export(temp_filename, format="mp3")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+            temp_filename = temp_file.name
+            trimmed_audio.export(temp_filename, format="mp3")
 
         # Отправляем аудио в группу
         with open(temp_filename, "rb") as audio_file:
