@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TARGET_GROUP_ID = -1002437528572
+TARGET_GROUP_ID = -1002382138419  # Обновленная целевая группа
 ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
 PINNED_DURATION = 2700  # 45 минут
 ALLOWED_USER = "@Muzikant1429"
@@ -35,7 +35,7 @@ last_pinned_times = {}  # {chat_id: timestamp}
 last_user_username = {}  # {chat_id: username}
 last_thanks_times = {}  # {chat_id: timestamp}
 pinned_messages = {}  # {chat_id: {"message_id": int, "user_id": int}}
-message_history = {}  # {message_id: {"chat_id": int, "user_id": int, "text": str}}
+banned_users = set()  # {user_id}
 
 async def is_admin_or_musician(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
@@ -93,13 +93,6 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
         last_pinned_times[chat_id] = current_time
         last_user_username[chat_id] = user.username or f"id{user.id}"
         
-        # Сохраняем в историю сообщений
-        message_history[update.message.message_id] = {
-            "chat_id": chat_id,
-            "user_id": user.id,
-            "text": text
-        }
-        
         # Устанавливаем таймер открепления
         context.job_queue.run_once(unpin_message, PINNED_DURATION, chat_id=chat_id)
         
@@ -141,28 +134,12 @@ async def process_duplicate_message(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"Ошибка при обработке дубликата: {e}")
 
-async def handle_message_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.edited_message or not update.message:
-        return
-        
-    deleted_message_id = update.message.message_id
-    if deleted_message_id in message_history:
-        data = message_history[deleted_message_id]
-        if data["chat_id"] in pinned_messages and pinned_messages[data["chat_id"]]["message_id"] == deleted_message_id:
-            # Сбрасываем таймер если удалено закрепленное сообщение
-            if data["chat_id"] in last_pinned_times:
-                del last_pinned_times[data["chat_id"]]
-            if data["chat_id"] in pinned_messages:
-                del pinned_messages[data["chat_id"]]
-                
-            logger.info(f"ЗЧ удалена пользователем, сброс таймера в чате {data['chat_id']}")
-
 async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.edited_message:
         return
         
     edited_message = update.edited_message
-    if edited_message.message_id in message_history:
+    if edited_message.message_id in [msg["message_id"] for msg in pinned_messages.values()]:
         # Полная повторная проверка отредактированного сообщения
         await handle_message(update, context)
 
@@ -249,7 +226,6 @@ def main():
     app.add_handler(CommandHandler("timer", reset_pin_timer))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
-    app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.DELETED_MESSAGE, handle_message_deletion))
     
     app.run_polling()
     logger.info("Бот запущен")
