@@ -543,12 +543,9 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         reaction = update.message_reaction
         if not reaction:
-            logger.warning("Получен пустой reaction update")
             return
-        
+            
         chat_id = reaction.chat.id
-        logger.info(f"Реакция в чате {reaction.chat.id} от пользователя {reaction.user.id}")
-        
         if chat_id != TRACKED_CHAT_ID:
             return
             
@@ -559,17 +556,13 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = user.id
         username = user.username or f"id{user_id}"
         
-        logger.info(f"Новая реакция от @{username} (ID: {user_id})")
-        
-        if user_id not in REACTION_STATS:
-            REACTION_STATS[user_id] = {"username": username, "reactions": 0}
-            logger.info(f"Новый пользователь в статистике: @{username}")
-        
+        REACTION_STATS.setdefault(user_id, {"username": username, "reactions": 0})
         REACTION_STATS[user_id]["reactions"] += 1
-        logger.info(f"Обновлена статистика: @{username} - {REACTION_STATS[user_id]['reactions']} реакций")
+        
+        logger.info(f"Новая реакция от @{username}. Всего: {REACTION_STATS[user_id]['reactions']}")
         
     except Exception as e:
-        logger.error(f"Ошибка в handle_reaction: {e}", exc_info=True)
+        logger.error(f"Ошибка обработки реакции: {e}")
         
 # Команда /clean
 async def clean_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
