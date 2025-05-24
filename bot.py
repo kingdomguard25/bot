@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HTML_URL = os.getenv("HTML_URL")
 TARGET_GROUP_ID = -1002437528572
-ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
+ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002382138419]
 PINNED_DURATION = 2700  # 45 минут
 MESSAGE_STORAGE_TIME = 180  # 3 минуты для хранения сообщений
 ALLOWED_USER = "@Muzikant1429"
@@ -321,6 +321,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         user = message.from_user
         chat_id = message.chat.id
+        # Проверка на неразрешенный чат (добавлено в начало)
+        if chat_id not in ALLOWED_CHAT_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ Я работаю только в разрешенных чатах. Покидаю этот чат."
+                )
+                await context.bot.leave_chat(chat_id)
+                logger.warning(f"Бот вышел из неразрешенного чата {chat_id}")
+            except Exception as e:
+                logger.error(f"Ошибка при выходе из чата {chat_id}: {e}")
+            return
+            
         text = message.text or message.caption
         current_time = time.time()
         
