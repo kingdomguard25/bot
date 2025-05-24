@@ -29,7 +29,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 HTML_URL = os.getenv("HTML_URL")
 
 # ID целевой группы (если нужно пересылать сообщения)
-TARGET_GROUP_ID = -1002437528572
+TARGET_GROUP_ID = -1002382138419
 
 # Разрешенные ID групп
 ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
