@@ -305,34 +305,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Проверка на ЗЧ
         if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
-            # Проверяем, есть ли активное закрепленное сообщение
-            if chat_id in pinned_messages:
-                last_pin_time = pinned_messages[chat_id]["timestamp"]
-                
-                # Если время не истекло и это не редактирование своего сообщения
-                if (current_time - last_pin_time < PINNED_DURATION and 
-                    not (update.edited_message and pinned_messages[chat_id]["user_id"] == user.id)):
-                    
-                    if await is_admin_or_musician(update, context):
-                        # Админ может заменить закреп
-                        await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
-                        correction = await context.bot.send_message(
-                            chat_id=chat_id,
-                            text="Корректировка звезды часа от Админа."
-                        )
-                        context.job_queue.run_once(
-                            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
-                            10
-                        )
-                    else:
-                        # Обычный пользователь - удаляем сообщение
-                        await process_duplicate_message(update, context, chat_id, user)
-                else:
-                    # Время истекло или это редактирование своего сообщения - можно закрепить новое
-                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=bool(update.edited_message))
-            else:
-                # Нет активного закрепленного сообщения - закрепляем новое
+            # Проверяем наличие активного закрепленного сообщения
+            chat = await context.bot.get_chat(chat_id)
+            has_active_pin = chat.pinned_message and chat.pinned_message.message_id == pinned_messages.get(chat_id, {}).get("message_id")
+            
+            # Если нет активного закрепленного сообщения или время истекло
+            if not has_active_pin or current_time - pinned_messages.get(chat_id, {}).get("timestamp", 0) >= PINNED_DURATION:
                 await process_new_pinned_message(update, context, chat_id, user, text)
+            else:
+                # Если время не истекло
+                if await is_admin_or_musician(update, context):
+                    # Админ может заменить закреп
+                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+                    correction = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Корректировка звезды часа от Админа."
+                    )
+                    context.job_queue.run_once(
+                        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
+                        10
+                    )
+                else:
+                    # Обычный пользователь - удаляем сообщение
+                    await process_duplicate_message(update, context, chat_id, user)
                 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
@@ -343,17 +338,25 @@ async def handle_message_delete(update: Update, context: ContextTypes.DEFAULT_TY
         return
         
     chat_id = update.message.chat.id
-    if chat_id in pinned_messages and update.message.message_id == pinned_messages[chat_id]["message_id"]:
-        # Если удалено закрепленное сообщение - сбрасываем таймер
-        if chat_id in pinned_messages:
-            del pinned_messages[chat_id]
+    message_id = update.message.message_id
+    
+    # Проверяем, было ли это сообщение закрепленной "ЗЧ"
+    if chat_id in pinned_messages and pinned_messages[chat_id]["message_id"] == message_id:
+        logger.info(f"Удалена закрепленная ЗЧ в чате {chat_id}")
+        
+        # Сбрасываем таймер для этого чата
         if chat_id in last_pinned_times:
             del last_pinned_times[chat_id]
+        
+        # Удаляем информацию о закреплении
+        del pinned_messages[chat_id]
+        
+        # Удаляем связанное фото, если оно есть
         if chat_id in sent_photos:
             try:
                 await context.bot.delete_message(chat_id, sent_photos[chat_id])
             except Exception as e:
-                logger.error(f"Ошибка удаления фото: {e}")
+                logger.error(f"Ошибка при удалении фото: {e}")
             del sent_photos[chat_id]
 
 async def basic_checks(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
