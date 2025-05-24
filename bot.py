@@ -95,25 +95,23 @@ async def unpin_message(context: CallbackContext):
         try:
             # Удаляем закрепленное сообщение
             await context.bot.unpin_chat_message(chat_id, pinned_messages[chat_id]["message_id"])
-            
-            # Удаляем связанное фото, если оно есть
-            if "photo_id" in pinned_messages[chat_id]:
-                try:
-                    await context.bot.delete_message(chat_id, pinned_messages[chat_id]["photo_id"])
-                except Exception as e:
-                    logger.error(f"Ошибка удаления фото: {e}")
-            
             logger.info(f"Сообщение откреплено в чате {chat_id}")
         except Exception as e:
             logger.error(f"Ошибка открепления: {e}")
         finally:
+            # Удаляем фото только если оно принадлежит этому сообщению
+            if "photo_id" in pinned_messages[chat_id] and pinned_messages[chat_id]["photo_id"] == sent_photos.get(chat_id):
+                try:
+                    await context.bot.delete_message(chat_id, pinned_messages[chat_id]["photo_id"])
+                    del sent_photos[chat_id]
+                except Exception as e:
+                    logger.error(f"Ошибка удаления фото: {e}")
+            
             del pinned_messages[chat_id]
             if chat_id in last_pinned_times:
                 del last_pinned_times[chat_id]
-            if chat_id in sent_photos:
-                del sent_photos[chat_id]
 
-async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, text: str):
+async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, text: str, is_edit: bool = False):
     current_time = time.time()
     message = update.message or update.edited_message
     
@@ -126,8 +124,8 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
             break
     
     try:
-        # Удаляем старое фото, если оно есть
-        if chat_id in sent_photos:
+        # Удаляем старое фото только если это редактирование тем же пользователем
+        if is_edit and chat_id in sent_photos and pinned_messages.get(chat_id, {}).get("user_id") == user.id:
             try:
                 await context.bot.delete_message(chat_id, sent_photos[chat_id])
                 del sent_photos[chat_id]
@@ -167,29 +165,31 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
             return
         
         # Если это обычная группа - обрабатываем пересылку в целевую
-        await process_target_group_forward(update, context, chat_id, user, text, target_message, current_time)
+        await process_target_group_forward(update, context, chat_id, user, text, target_message, current_time, is_edit)
                 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
 
 async def process_target_group_forward(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                      source_chat_id: int, user, text: str, 
-                                     target_message: dict, current_time: float):
+                                     target_message: dict, current_time: float,
+                                     is_edit: bool = False):
     try:
         # Проверяем, есть ли активное закрепленное сообщение в целевой группе
         target_has_active_pin = (TARGET_GROUP_ID in pinned_messages and 
                                 current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] < PINNED_DURATION)
         
         # Если в целевой группе есть активная ЗЧ и она была переслана из этой группы
-        if target_has_active_pin:
-            source_message = pinned_messages[TARGET_GROUP_ID].get("source_chat_id")
-            if source_message == source_chat_id:
-                # Удаляем старую ЗЧ в целевой группе
-                await context.bot.unpin_chat_message(TARGET_GROUP_ID, pinned_messages[TARGET_GROUP_ID]["message_id"])
-                if "photo_id" in pinned_messages[TARGET_GROUP_ID]:
+        if target_has_active_pin and pinned_messages[TARGET_GROUP_ID].get("source_chat_id") == source_chat_id:
+            # Удаляем старую ЗЧ в целевой группе
+            await context.bot.unpin_chat_message(TARGET_GROUP_ID, pinned_messages[TARGET_GROUP_ID]["message_id"])
+            if "photo_id" in pinned_messages[TARGET_GROUP_ID]:
+                try:
                     await context.bot.delete_message(TARGET_GROUP_ID, pinned_messages[TARGET_GROUP_ID]["photo_id"])
-                del pinned_messages[TARGET_GROUP_ID]
-                target_has_active_pin = False
+                except Exception as e:
+                    logger.error(f"Ошибка удаления фото в целевой группе: {e}")
+            del pinned_messages[TARGET_GROUP_ID]
+            target_has_active_pin = False
         
         # Если в целевой группе нет активной ЗЧ или она была удалена
         if not target_has_active_pin:
@@ -219,19 +219,19 @@ async def process_target_group_forward(update: Update, context: ContextTypes.DEF
             
             # Отправляем фото в целевую группу, если есть
             if target_message and target_message["photo"]:
-                photo_message = await context.bot.send_photo(
-                    chat_id=TARGET_GROUP_ID,
-                    photo=target_message["photo"]
-                )
-                pinned_messages[TARGET_GROUP_ID]["photo_id"] = photo_message.message_id
+                try:
+                    photo_message = await context.bot.send_photo(
+                        chat_id=TARGET_GROUP_ID,
+                        photo=target_message["photo"]
+                    )
+                    pinned_messages[TARGET_GROUP_ID]["photo_id"] = photo_message.message_id
+                except Exception as e:
+                    logger.error(f"Ошибка отправки фото в целевую группу: {e}")
             
             logger.info(f"Сообщение переслано и закреплено в целевой группе")
             
     except Exception as e:
         logger.error(f"Ошибка при обработке целевой группы: {e}")
-
-# Остальные функции (process_duplicate_message, handle_message_edit, handle_message, 
-# basic_checks, reset_pin_timer, update_google_table, main) остаются без изменений
 
 async def process_duplicate_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user):
     current_time = time.time()
@@ -257,15 +257,21 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     edited_msg = update.edited_message
-    if edited_msg.message_id in message_storage:
-        # Обновляем текст в хранилище
-        message_storage[edited_msg.message_id]["text"] = edited_msg.text or edited_msg.caption
-        message_storage[edited_msg.message_id]["timestamp"] = time.time()
+    chat_id = edited_msg.chat.id
+    user = edited_msg.from_user
+    
+    # Проверяем, что это закрепленное сообщение
+    if chat_id in pinned_messages and pinned_messages[chat_id]["message_id"] == edited_msg.message_id:
+        text = edited_msg.text or edited_msg.caption
         
-        # Если это закрепленное сообщение - обрабатываем как новое
-        chat_id = edited_msg.chat.id
-        if chat_id in pinned_messages and pinned_messages[chat_id]["message_id"] == edited_msg.message_id:
-            await handle_message(update, context)
+        # Проверки на бан, разрешенные чаты, мат и рекламу
+        if (user.id in banned_users or 
+            chat_id not in ALLOWED_CHAT_IDS or
+            not await basic_checks(update, context, text)):
+            return
+        
+        # Обрабатываем как новое закрепленное сообщение
+        await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -294,7 +300,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if current_time - last_pin_time < PINNED_DURATION:
                     if await is_admin_or_musician(update, context):
                         # Админ может заменить закреп
-                        await process_new_pinned_message(update, context, chat_id, user, text)
+                        await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
                         correction = await context.bot.send_message(
                             chat_id=chat_id,
                             text="Корректировка звезды часа от Админа."
