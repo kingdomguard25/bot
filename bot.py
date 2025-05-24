@@ -270,8 +270,11 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = edited_msg.chat.id
     user = edited_msg.from_user
     
-    # Проверяем, что это закрепленное сообщение
-    if chat_id in pinned_messages and pinned_messages[chat_id]["message_id"] == edited_msg.message_id:
+    # Проверяем, что это закрепленное сообщение и пользователь является его автором
+    if (chat_id in pinned_messages and 
+        pinned_messages[chat_id]["message_id"] == edited_msg.message_id and
+        pinned_messages[chat_id]["user_id"] == user.id):
+        
         text = edited_msg.text or edited_msg.caption
         
         # Проверки на бан, разрешенные чаты, мат и рекламу
@@ -303,27 +306,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверка на ЗЧ
         if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
             # Проверяем, есть ли активное закрепленное сообщение
-            pinned_exists = await check_pinned_message_exists(context, chat_id)
-            
-            # Если сообщение было удалено или время истекло - разрешаем закрепление
-            if not pinned_exists or current_time - pinned_messages.get(chat_id, {}).get("timestamp", 0) >= PINNED_DURATION:
-                await process_new_pinned_message(update, context, chat_id, user, text)
-            else:
-                # Если время не истекло
-                if await is_admin_or_musician(update, context):
-                    # Админ может заменить закреп
-                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
-                    correction = await context.bot.send_message(
-                        chat_id=chat_id,
-                        text="Корректировка звезды часа от Админа."
-                    )
-                    context.job_queue.run_once(
-                        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
-                        10
-                    )
+            if chat_id in pinned_messages:
+                last_pin_time = pinned_messages[chat_id]["timestamp"]
+                
+                # Если время не истекло и это не редактирование своего сообщения
+                if (current_time - last_pin_time < PINNED_DURATION and 
+                    not (update.edited_message and pinned_messages[chat_id]["user_id"] == user.id)):
+                    
+                    if await is_admin_or_musician(update, context):
+                        # Админ может заменить закреп
+                        await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+                        correction = await context.bot.send_message(
+                            chat_id=chat_id,
+                            text="Корректировка звезды часа от Админа."
+                        )
+                        context.job_queue.run_once(
+                            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
+                            10
+                        )
+                    else:
+                        # Обычный пользователь - удаляем сообщение
+                        await process_duplicate_message(update, context, chat_id, user)
                 else:
-                    # Обычный пользователь - удаляем сообщение
-                    await process_duplicate_message(update, context, chat_id, user)
+                    # Время истекло или это редактирование своего сообщения - можно закрепить новое
+                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=bool(update.edited_message))
+            else:
+                # Нет активного закрепленного сообщения - закрепляем новое
+                await process_new_pinned_message(update, context, chat_id, user, text)
                 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
