@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HTML_URL = os.getenv("HTML_URL")
-TARGET_GROUP_ID = -1002382138419
+TARGET_GROUP_ID = -1002437528572
 ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
 PINNED_DURATION = 2700  # 45 минут
 MESSAGE_STORAGE_TIME = 180  # 3 минуты для хранения сообщений
@@ -463,10 +463,8 @@ def main():
     app.add_handler(CommandHandler("google", update_google_table))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
-    app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.MESSAGE & filters.ChatType.GROUPS, handle_message_delete))
     
     app.run_polling()
     logger.info("Бот запущен")
-
 if __name__ == '__main__':
     main()
