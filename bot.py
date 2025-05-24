@@ -13,6 +13,7 @@ import time
 import os
 from bs4 import BeautifulSoup
 import requests
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(
@@ -102,18 +103,23 @@ async def unpin_message(context: CallbackContext):
 
 async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, text: str):
     current_time = time.time()
+    message = update.message or update.edited_message
     
     # Закрепляем сообщение
-    await update.message.pin()
+    try:
+        await message.pin()
+    except Exception as e:
+        logger.error(f"Ошибка при закреплении: {e}")
+        return
     
     # Сохраняем данные
     pinned_messages[chat_id] = {
-        "message_id": update.message.message_id,
+        "message_id": message.message_id,
         "user_id": user.id,
         "text": text,
         "timestamp": current_time
     }
-    message_storage[update.message.message_id] = {
+    message_storage[message.message_id] = {
         "chat_id": chat_id,
         "user_id": user.id,
         "text": text,
@@ -131,12 +137,7 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
         logger.info(f"ЗЧ в целевой группе от @{user.username}")
         return
     
-    # Для обычной группы - проверяем, есть ли активная ЗЧ в целевой группе
-    if TARGET_GROUP_ID in pinned_messages and current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] < PINNED_DURATION:
-        logger.info(f"Пропускаем пересылку - в целевой группе уже есть активная ЗЧ")
-        return
-    
-    # Проверяем Google таблицу только для обычных групп
+    # Проверяем Google таблицу для обычных групп
     text_cleaned = clean_text(text)
     target_message = None
     for word in text_cleaned.split():
@@ -145,26 +146,42 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
             break
     
     try:
+        # Отправляем фото в текущую группу, если есть
         if target_message and target_message["photo"]:
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=target_message["photo"]
             )
         
-        # В целевую группу пересылаем только если там нет активной ЗЧ
-        if TARGET_GROUP_ID not in pinned_messages or current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] >= PINNED_DURATION:
+        # Пересылаем в целевую группу только если там нет активной ЗЧ
+        target_has_active_pin = TARGET_GROUP_ID in pinned_messages and current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] < PINNED_DURATION
+        
+        if not target_has_active_pin:
             forwarded_text = target_message["message"] if target_message else f"🌟 {text.replace('🌟', '').strip()}"
             forwarded = await context.bot.send_message(
                 chat_id=TARGET_GROUP_ID,
                 text=forwarded_text
             )
             await forwarded.pin()
+            
+            # Сохраняем данные о закреплении в целевой группе
+            pinned_messages[TARGET_GROUP_ID] = {
+                "message_id": forwarded.message_id,
+                "user_id": user.id,
+                "text": forwarded_text,
+                "timestamp": current_time
+            }
+            context.job_queue.run_once(unpin_message, PINNED_DURATION, chat_id=TARGET_GROUP_ID)
+            
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
 
 async def process_duplicate_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user):
     current_time = time.time()
-    await update.message.delete()
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
     
     if current_time - last_thanks_times.get(chat_id, 0) > 180:
         last_user = last_user_username.get(chat_id, "администратора")
@@ -202,6 +219,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = message.from_user
         chat_id = message.chat.id
         text = message.text or message.caption
+        current_time = time.time()
         
         # Проверки на бан, разрешенные чаты, мат и рекламу
         if (user.id in banned_users or 
@@ -211,23 +229,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Проверка на ЗЧ
         if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
-            current_time = time.time()
-            
+            # Проверяем, есть ли уже активное закрепленное сообщение
             if chat_id in pinned_messages:
                 last_pin_time = pinned_messages[chat_id]["timestamp"]
                 
-                if await is_admin_or_musician(update, context):
-                    await process_new_pinned_message(update, context, chat_id, user, text)
-                    correction = await context.bot.send_message(chat_id, "Корректировка звезды часа от Админа.")
-                    context.job_queue.run_once(
-                        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
-                        10
-                    )
-                elif current_time - last_pin_time < PINNED_DURATION:
-                    await process_duplicate_message(update, context, chat_id, user)
+                # Если время не истекло
+                if current_time - last_pin_time < PINNED_DURATION:
+                    if await is_admin_or_musician(update, context):
+                        # Админ может заменить закреп
+                        await process_new_pinned_message(update, context, chat_id, user, text)
+                        correction = await context.bot.send_message(
+                            chat_id=chat_id,
+                            text="Корректировка звезды часа от Админа."
+                        )
+                        context.job_queue.run_once(
+                            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
+                            10
+                        )
+                    else:
+                        # Обычный пользователь - удаляем сообщение
+                        await process_duplicate_message(update, context, chat_id, user)
                 else:
+                    # Время истекло - можно закрепить новое
                     await process_new_pinned_message(update, context, chat_id, user, text)
             else:
+                # Нет активного закрепленного сообщения - закрепляем новое
                 await process_new_pinned_message(update, context, chat_id, user, text)
                 
     except Exception as e:
@@ -284,6 +310,26 @@ async def reset_pin_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.delete()
 
+async def update_google_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin_or_musician(update, context):
+        resp = await update.message.reply_text("У вас нет прав для этой команды.")
+        context.job_queue.run_once(
+            lambda ctx: ctx.bot.delete_message(chat_id=update.message.chat.id, message_id=resp.message_id),
+            10
+        )
+        await update.message.delete()
+        return
+    
+    global STAR_MESSAGES
+    STAR_MESSAGES = load_star_messages()
+    
+    resp = await update.message.reply_text(f"Google таблица обновлена. Загружено {len(STAR_MESSAGES)} записей.")
+    context.job_queue.run_once(
+        lambda ctx: ctx.bot.delete_message(chat_id=update.message.chat.id, message_id=resp.message_id),
+        10
+    )
+    await update.message.delete()
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -292,6 +338,7 @@ def main():
     job_queue.run_repeating(cleanup_storage, interval=60, first=10)
     
     app.add_handler(CommandHandler("timer", reset_pin_timer))
+    app.add_handler(CommandHandler("google", update_google_table))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
     
