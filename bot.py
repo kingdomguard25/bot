@@ -23,6 +23,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HTML_URL = os.getenv("HTML_URL")
@@ -325,6 +327,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         user = message.from_user
+
+        # Логируем входящее сообщение
+        log_text = f"Сообщение от @{user.username or user.id} (ID: {user.id}) в чате {message.chat.id}: "
+        if message.text:
+            log_text += f"текст: {message.text}"
+        elif message.caption:
+            log_text += f"подпись: {message.caption}"
+        elif message.photo:
+            log_text += "фото"
+        elif message.sticker:
+            log_text += f"стикер ({message.sticker.emoji})"
+        else:
+            log_text += f"тип контента: {message.content_type}"
+        logger.info(log_text)
+        
         chat_id = message.chat.id
         # Проверка на неразрешенный чат (добавлено в начало)
         if chat_id not in ALLOWED_CHAT_IDS:
@@ -521,59 +538,37 @@ async def delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Новая функция для обработки реакций
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reaction = update.message_reaction  # Получаем данные о реакции
-    if not reaction:
-        return
+    try:
+        reaction = update.message_reaction
+        if not reaction:
+            logger.warning("Получен пустой reaction update")
+            return
         
-    chat_id = reaction.chat.id
-    if chat_id != TRACKED_CHAT_ID:  # Проверяем, что реакция в нужном чате
-        return
+        chat_id = reaction.chat.id
+        logger.info(f"Реакция в чате {reaction.chat.id} от пользователя {reaction.user.id}")
         
-    user = reaction.user
-    if user.is_bot:  # Игнорируем ботов
-        return
+        if chat_id != TRACKED_CHAT_ID:
+            return
+            
+        user = reaction.user
+        if user.is_bot:
+            return
+            
+        user_id = user.id
+        username = user.username or f"id{user_id}"
         
-    user_id = user.id
-    username = user.username or f"id{user_id}"
-    
-    # Обновляем статистику
-    if user_id not in REACTION_STATS:
-        REACTION_STATS[user_id] = {"username": username, "reactions": 0}
-    
-    REACTION_STATS[user_id]["reactions"] += 1
-    logger.info(f"Реакция от @{username} (ID: {user_id})")
-
-# Команда /stat
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin_or_musician(update, context):
-        await update.message.reply_text("❌ Эта команда только для администраторов")
-        return
+        logger.info(f"Новая реакция от @{username} (ID: {user_id})")
         
-    if not REACTION_STATS:
-        stats_text = "📊 Пока нет данных о реакциях"
-    else:
-        # Сортируем по количеству реакций
-        sorted_stats = sorted(REACTION_STATS.items(), key=lambda x: x[1]["reactions"], reverse=True)
+        if user_id not in REACTION_STATS:
+            REACTION_STATS[user_id] = {"username": username, "reactions": 0}
+            logger.info(f"Новый пользователь в статистике: @{username}")
         
-        stats_text = "🌟 Топ активных пользователей (по реакциям):\n\n"
-        for i, (user_id, data) in enumerate(sorted_stats[:20], 1):  # Топ 20
-            stats_text += f"{i}. @{data['username']}: {data['reactions']} реакций\n"
+        REACTION_STATS[user_id]["reactions"] += 1
+        logger.info(f"Обновлена статистика: @{username} - {REACTION_STATS[user_id]['reactions']} реакций")
         
-        stats_text += f"\nВсего пользователей: {len(REACTION_STATS)}"
-    
-    # Отправляем в админский чат
-    await context.bot.send_message(
-        chat_id=ADMIN_GROUP_ID,
-        text=stats_text
-    )
-    
-    # И в целевой чат (если команда вызвана не в нем)
-    if update.effective_chat.id != TRACKED_CHAT_ID:
-        await context.bot.send_message(
-            chat_id=TRACKED_CHAT_ID,
-            text=stats_text
-        )
-
+    except Exception as e:
+        logger.error(f"Ошибка в handle_reaction: {e}", exc_info=True)
+        
 # Команда /clean
 async def clean_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin_or_musician(update, context):
@@ -585,7 +580,81 @@ async def clean_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("📊 Статистика реакций очищена. Начинаем новый подсчет!")
 
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin_or_musician(update, context):
+        await update.message.reply_text("❌ Только для администраторов")
+        return
 
+    # Кнопки для выбора топа
+    keyboard = [
+        [InlineKeyboardButton("Топ 3", callback_data="top3")],
+        [InlineKeyboardButton("Топ 10", callback_data="top10")],
+        [InlineKeyboardButton("Все", callback_data="topall")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "📊 Выберите вариант статистики:",
+        reply_markup=reply_markup
+    )
+
+async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    top_type = query.data
+    sorted_stats = sorted(REACTION_STATS.items(), key=lambda x: x[1]["reactions"], reverse=True)
+    
+    if top_type == "top3":
+        stats = sorted_stats[:3]
+    elif top_type == "top10":
+        stats = sorted_stats[:10]
+    else:
+        stats = sorted_stats
+    
+    stats_text = "🌟 Топ активных пользователей:\n\n" + "\n".join(
+        f"{i+1}. @{data['username']}: {data['reactions']} реакций"
+        for i, (_, data) in enumerate(stats)
+    )
+    
+    # Кнопки для выбора чата отправки
+    keyboard = [
+        [InlineKeyboardButton("Админам", callback_data=f"send_admin_{top_type}")],
+        [InlineKeyboardButton("В общий чат", callback_data=f"send_group_{top_type}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"{stats_text}\n\nКуда отправить?",
+        reply_markup=reply_markup
+    )
+
+async def send_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    action, top_type = query.data.split("_")
+    sorted_stats = sorted(REACTION_STATS.items(), key=lambda x: x[1]["reactions"], reverse=True)
+    
+    if top_type == "top3":
+        stats = sorted_stats[:3]
+    elif top_type == "top10":
+        stats = sorted_stats[:10]
+    else:
+        stats = sorted_stats
+    
+    stats_text = "🌟 Топ активных пользователей:\n\n" + "\n".join(
+        f"{i+1}. @{data['username']}: {data['reactions']} реакций"
+        for i, (_, data) in enumerate(stats)
+    )
+    
+    if action == "send_admin":
+        await context.bot.send_message(ADMIN_GROUP_ID, stats_text)
+    else:
+        await context.bot.send_message(TRACKED_CHAT_ID, stats_text)
+    
+    await query.edit_message_text("✅ Статистика отправлена")
+    
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
