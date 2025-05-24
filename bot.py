@@ -429,7 +429,7 @@ def main():
     app.add_handler(CommandHandler("google", update_google_table))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
-    app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.MESSAGE & filters.Group.ChatType.GROUPS, handle_message_delete))
+    app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.MESSAGE & filters.ChatType.GROUPS, handle_message_delete))
     
     app.run_polling()
     logger.info("Бот запущен")
