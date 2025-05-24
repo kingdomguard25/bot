@@ -332,35 +332,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Проверка на ЗЧ
         if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
-            # Проверяем, есть ли активное закрепленное сообщение
+            # Получаем текущее закрепленное сообщение из чата
+            try:
+                chat = await context.bot.get_chat(chat_id)
+                current_pinned = chat.pinned_message
+                
+                # Если есть закрепленное сообщение в данных бота
+                if chat_id in pinned_messages:
+                    # Если сообщение в чате не соответствует сохраненному - значит оно было удалено
+                    if not current_pinned or current_pinned.message_id != pinned_messages[chat_id]["message_id"]:
+                        # Сбрасываем таймер, так как сообщение было удалено
+                        del pinned_messages[chat_id]
+                        if chat_id in last_pinned_times:
+                            del last_pinned_times[chat_id]
+                        if chat_id in sent_photos:
+                            try:
+                                await context.bot.delete_message(chat_id, sent_photos[chat_id])
+                                del sent_photos[chat_id]
+                            except Exception as e:
+                                logger.error(f"Ошибка удаления фото: {e}")
+            except Exception as e:
+                logger.error(f"Ошибка при проверке закрепленного сообщения: {e}")
+
+            # Проверяем, можно ли закрепить новое сообщение
+            can_pin = True
             if chat_id in pinned_messages:
                 last_pin_time = pinned_messages[chat_id]["timestamp"]
-                
-                # Если это редактирование своего сообщения - разрешаем
-                if update.edited_message and pinned_messages[chat_id]["user_id"] == user.id:
-                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
-                # Если время не истекло
-                elif current_time - last_pin_time < PINNED_DURATION:
-                    if await is_admin_or_musician(update, context):
-                        # Админ может заменить закреп
-                        await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
-                        correction = await context.bot.send_message(
-                            chat_id=chat_id,
-                            text="Корректировка звезды часа от Админа."
-                        )
-                        context.job_queue.run_once(
-                            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
-                            10
-                        )
-                    else:
-                        # Обычный пользователь - удаляем сообщение
-                        await process_duplicate_message(update, context, chat_id, user)
-                else:
-                    # Время истекло - можно закрепить новое
-                    await process_new_pinned_message(update, context, chat_id, user, text)
-            else:
-                # Нет активного закрепленного сообщения - закрепляем новое
+                if current_time - last_pin_time < PINNED_DURATION:
+                    can_pin = False
+            
+            if can_pin:
                 await process_new_pinned_message(update, context, chat_id, user, text)
+            else:
+                if await is_admin_or_musician(update, context):
+                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+                    correction = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Корректировка звезды часа от Админа."
+                    )
+                    context.job_queue.run_once(
+                        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
+                        10
+                    )
+                else:
+                    await process_duplicate_message(update, context, chat_id, user)
                 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
