@@ -11,6 +11,8 @@ from telegram.ext import (
 import logging
 import time
 import os
+from bs4 import BeautifulSoup
+import requests
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,47 +23,67 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TARGET_GROUP_ID = -1002382138419  # Обновленная целевая группа
+HTML_URL = os.getenv("HTML_URL")
+TARGET_GROUP_ID = -1002382138419
 ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
 PINNED_DURATION = 2700  # 45 минут
+MESSAGE_STORAGE_TIME = 180  # 3 минуты для хранения сообщений
 ALLOWED_USER = "@Muzikant1429"
 
-# Антимат и антиспам настройки
+# Антимат
 BANNED_WORDS = ["бляд", "хуй", "пизд", "наху", "гандон", "пидр", "пидорас", "пидар", "шалав", "шлюх", "мразь", "мразо", "ебат", "ебал", "дебил", "имебецил", "говнюк"]
 MESSENGER_KEYWORDS = ["t.me", "telegram", "whatsapp", "viber", "discord", "vk.com", "instagram", "facebook", "twitter", "youtube", "http", "www", ".com", ".ru", ".net", "tiktok"]
 
-# Глобальные переменные для хранения данных
-last_pinned_times = {}  # {chat_id: timestamp}
-last_user_username = {}  # {chat_id: username}
-last_thanks_times = {}  # {chat_id: timestamp}
-pinned_messages = {}  # {chat_id: {"message_id": int, "user_id": int}}
-banned_users = set()  # {user_id}
+# Глобальные переменные
+last_pinned_times = {}
+last_user_username = {}
+last_thanks_times = {}
+pinned_messages = {}  # {chat_id: {"message_id": int, "user_id": int, "text": str, "timestamp": float}}
+message_storage = {}  # {message_id: {"chat_id": int, "user_id": int, "text": str, "timestamp": float}}
+STAR_MESSAGES = {}
+banned_users = set()
+
+def clean_text(text: str) -> str:
+    return " ".join(text.split()).lower() if text else ""
+
+def load_star_messages():
+    try:
+        response = requests.get(HTML_URL)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        return {
+            clean_text(row.find_all("td")[0].text.strip()): {
+                "message": row.find_all("td")[1].text.strip(),
+                "photo": row.find_all("td")[2].text.strip() if row.find_all("td")[2].text.strip().startswith("http") else None
+            }
+            for row in soup.find_all("tr")[1:] if len(row.find_all("td")) >= 3
+        }
+    except Exception as e:
+        logger.error(f"Ошибка загрузки Google таблицы: {e}")
+        return {}
+
+STAR_MESSAGES = load_star_messages()
 
 async def is_admin_or_musician(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat.id
-    user_id = update.message.from_user.id
-
-    if chat_id not in ALLOWED_CHAT_IDS and chat_id != TARGET_GROUP_ID:
+    user = update.effective_user
+    if user.username == ALLOWED_USER[1:]:
+        return True
+    
+    try:
+        chat_member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
+        return chat_member.status in ["administrator", "creator"]
+    except Exception as e:
+        logger.error(f"Ошибка проверки прав: {e}")
         return False
 
-    try:
-        chat_member = await context.bot.get_chat_member(chat_id, user_id)
-        if chat_member.status in ["administrator", "creator"]:
-            return True
-    except Exception as e:
-        logger.error(f"Ошибка при проверке прав: {e}")
-
-    if update.message.from_user.username == ALLOWED_USER[1:]:
-        return True
-
-    return False
-
-async def delete_system_message(context: CallbackContext):
-    job = context.job
-    try:
-        await context.bot.delete_message(chat_id=job.chat_id, message_id=job.data)
-    except Exception as e:
-        logger.error(f"Ошибка при удалении системного сообщения: {e}")
+async def cleanup_storage(context: CallbackContext):
+    current_time = time.time()
+    expired_messages = [
+        msg_id for msg_id, data in message_storage.items() 
+        if current_time - data["timestamp"] > MESSAGE_STORAGE_TIME
+    ]
+    for msg_id in expired_messages:
+        del message_storage[msg_id]
 
 async def unpin_message(context: CallbackContext):
     job = context.job
@@ -69,79 +91,107 @@ async def unpin_message(context: CallbackContext):
     
     if chat_id in pinned_messages:
         try:
-            await context.bot.unpin_chat_message(chat_id=chat_id, message_id=pinned_messages[chat_id]["message_id"])
+            await context.bot.unpin_chat_message(chat_id, pinned_messages[chat_id]["message_id"])
             logger.info(f"Сообщение откреплено в чате {chat_id}")
+        except Exception as e:
+            logger.error(f"Ошибка открепления: {e}")
+        finally:
             del pinned_messages[chat_id]
             if chat_id in last_pinned_times:
                 del last_pinned_times[chat_id]
-        except Exception as e:
-            logger.error(f"Ошибка при откреплении: {e}")
 
 async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, text: str):
+    current_time = time.time()
+    
+    # Закрепляем сообщение
+    await update.message.pin()
+    
+    # Сохраняем данные
+    pinned_messages[chat_id] = {
+        "message_id": update.message.message_id,
+        "user_id": user.id,
+        "text": text,
+        "timestamp": current_time
+    }
+    message_storage[update.message.message_id] = {
+        "chat_id": chat_id,
+        "user_id": user.id,
+        "text": text,
+        "timestamp": current_time
+    }
+    
+    last_pinned_times[chat_id] = current_time
+    last_user_username[chat_id] = user.username or f"id{user.id}"
+    
+    # Устанавливаем таймер открепления
+    context.job_queue.run_once(unpin_message, PINNED_DURATION, chat_id=chat_id)
+    
+    # Для целевой группы - только закрепление
+    if chat_id == TARGET_GROUP_ID:
+        logger.info(f"ЗЧ в целевой группе от @{user.username}")
+        return
+    
+    # Для обычной группы - проверяем, есть ли активная ЗЧ в целевой группе
+    if TARGET_GROUP_ID in pinned_messages and current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] < PINNED_DURATION:
+        logger.info(f"Пропускаем пересылку - в целевой группе уже есть активная ЗЧ")
+        return
+    
+    # Проверяем Google таблицу только для обычных групп
+    text_cleaned = clean_text(text)
+    target_message = None
+    for word in text_cleaned.split():
+        if word in STAR_MESSAGES:
+            target_message = STAR_MESSAGES[word]
+            break
+    
     try:
-        current_time = time.time()
+        if target_message and target_message["photo"]:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=target_message["photo"]
+            )
         
-        # Закрепляем сообщение
-        await update.message.pin()
-        
-        # Сохраняем данные
-        pinned_messages[chat_id] = {
-            "message_id": update.message.message_id,
-            "user_id": user.id
-        }
-        
-        last_pinned_times[chat_id] = current_time
-        last_user_username[chat_id] = user.username or f"id{user.id}"
-        
-        # Устанавливаем таймер открепления
-        context.job_queue.run_once(unpin_message, PINNED_DURATION, chat_id=chat_id)
-        
-        # Пересылаем только если это не целевая группа
-        if chat_id != TARGET_GROUP_ID:
-            try:
-                forwarded = await context.bot.send_message(
-                    chat_id=TARGET_GROUP_ID,
-                    text=f"🌟 {text.replace('🌟', '').strip()}"
-                )
-                await forwarded.pin()
-            except Exception as e:
-                logger.error(f"Ошибка пересылки: {e}")
-        
-        logger.info(f"Новая ЗЧ от @{user.username} в чате {chat_id}")
-        
+        # В целевую группу пересылаем только если там нет активной ЗЧ
+        if TARGET_GROUP_ID not in pinned_messages or current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] >= PINNED_DURATION:
+            forwarded_text = target_message["message"] if target_message else f"🌟 {text.replace('🌟', '').strip()}"
+            forwarded = await context.bot.send_message(
+                chat_id=TARGET_GROUP_ID,
+                text=forwarded_text
+            )
+            await forwarded.pin()
     except Exception as e:
-        logger.error(f"Ошибка при закреплении: {e}")
+        logger.error(f"Ошибка обработки сообщения: {e}")
 
 async def process_duplicate_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user):
-    try:
-        current_time = time.time()
-        
-        # Удаляем дубликат
-        await update.message.delete()
-        
-        # Отправляем благодарность (не чаще чем раз в 3 минуты)
-        if current_time - last_thanks_times.get(chat_id, 0) > 180:
-            last_user = last_user_username.get(chat_id, "администратора")
-            thanks = await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"@{user.username or user.id}, спасибо за бдительность! Звезда часа уже закреплена пользователем {last_user}. Надеюсь, в следующий раз именно Вы станете нашей 🌟!!!"
-            )
-            context.job_queue.run_once(delete_system_message, 180, data=thanks.message_id, chat_id=chat_id)
-            last_thanks_times[chat_id] = current_time
-        
-        logger.info(f"Удален дубликат ЗЧ от @{user.username} в чате {chat_id}")
-        
-    except Exception as e:
-        logger.error(f"Ошибка при обработке дубликата: {e}")
+    current_time = time.time()
+    await update.message.delete()
+    
+    if current_time - last_thanks_times.get(chat_id, 0) > 180:
+        last_user = last_user_username.get(chat_id, "администратора")
+        thanks = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"@{user.username or user.id}, спасибо за бдительность! Звезда часа уже закреплена пользователем {last_user}. Надеюсь, в следующий раз именно Вы станете нашей 🌟!!!"
+        )
+        context.job_queue.run_once(
+            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=thanks.message_id),
+            180
+        )
+        last_thanks_times[chat_id] = current_time
 
 async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.edited_message:
         return
+    
+    edited_msg = update.edited_message
+    if edited_msg.message_id in message_storage:
+        # Обновляем текст в хранилище
+        message_storage[edited_msg.message_id]["text"] = edited_msg.text or edited_msg.caption
+        message_storage[edited_msg.message_id]["timestamp"] = time.time()
         
-    edited_message = update.edited_message
-    if edited_message.message_id in [msg["message_id"] for msg in pinned_messages.values()]:
-        # Полная повторная проверка отредактированного сообщения
-        await handle_message(update, context)
+        # Если это закрепленное сообщение - обрабатываем как новое
+        chat_id = edited_msg.chat.id
+        if chat_id in pinned_messages and pinned_messages[chat_id]["message_id"] == edited_msg.message_id:
+            await handle_message(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -152,47 +202,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = message.from_user
         chat_id = message.chat.id
         text = message.text or message.caption
-        current_time = time.time()
-
-        # Проверка на бан
-        if user.id in banned_users:
-            await message.delete()
+        
+        # Проверки на бан, разрешенные чаты, мат и рекламу
+        if (user.id in banned_users or 
+            chat_id not in ALLOWED_CHAT_IDS or
+            not await basic_checks(update, context, text)):
             return
-
-        # Проверка разрешенных чатов
-        if chat_id not in ALLOWED_CHAT_IDS and chat_id != TARGET_GROUP_ID:
-            return
-
-        # Проверка на мат и рекламу
-        if text:
-            text_lower = text.lower()
-            if any(bad in text_lower for bad in BANNED_WORDS):
-                await message.delete()
-                warn = await context.bot.send_message(chat_id, "Использование мата запрещено!")
-                context.job_queue.run_once(delete_system_message, 10, data=warn.message_id, chat_id=chat_id)
-                return
-                
-            if any(adv in text_lower for adv in MESSENGER_KEYWORDS):
-                await message.delete()
-                warn = await context.bot.send_message(chat_id, "Реклама запрещена!")
-                context.job_queue.run_once(delete_system_message, 10, data=warn.message_id, chat_id=chat_id)
-                return
 
         # Проверка на ЗЧ
-        if text and ("звезда" in text.lower() or "зч" in text.lower() or "🌟" in text):
-            # Проверяем есть ли уже закрепленное сообщение
+        if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
+            current_time = time.time()
+            
             if chat_id in pinned_messages:
-                last_pin_time = last_pinned_times.get(chat_id, 0)
+                last_pin_time = pinned_messages[chat_id]["timestamp"]
                 
-                # Если админ - обновляем ЗЧ
                 if await is_admin_or_musician(update, context):
                     await process_new_pinned_message(update, context, chat_id, user, text)
                     correction = await context.bot.send_message(chat_id, "Корректировка звезды часа от Админа.")
-                    context.job_queue.run_once(delete_system_message, 10, data=correction.message_id, chat_id=chat_id)
-                # Если время не вышло - удаляем дубликат
+                    context.job_queue.run_once(
+                        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
+                        10
+                    )
                 elif current_time - last_pin_time < PINNED_DURATION:
                     await process_duplicate_message(update, context, chat_id, user)
-                # Если время вышло - новая ЗЧ
                 else:
                     await process_new_pinned_message(update, context, chat_id, user, text)
             else:
@@ -201,28 +233,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
 
+async def basic_checks(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    if not text:
+        return False
+        
+    chat_id = update.effective_chat.id
+    text_lower = text.lower()
+    
+    if any(bad in text_lower for bad in BANNED_WORDS):
+        await update.message.delete()
+        warn = await context.bot.send_message(chat_id, "Использование мата запрещено!")
+        context.job_queue.run_once(
+            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=warn.message_id),
+            10
+        )
+        return False
+        
+    if any(adv in text_lower for adv in MESSENGER_KEYWORDS):
+        await update.message.delete()
+        warn = await context.bot.send_message(chat_id, "Реклама запрещена!")
+        context.job_queue.run_once(
+            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=warn.message_id),
+            10
+        )
+        return False
+        
+    return True
+
 async def reset_pin_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin_or_musician(update, context):
         resp = await update.message.reply_text("У вас нет прав для этой команды.")
-        context.job_queue.run_once(delete_system_message, 10, data=resp.message_id, chat_id=update.message.chat.id)
+        context.job_queue.run_once(
+            lambda ctx: ctx.bot.delete_message(chat_id=update.message.chat.id, message_id=resp.message_id),
+            10
+        )
         await update.message.delete()
         return
         
     chat_id = update.message.chat.id
     if chat_id in pinned_messages:
-        await context.bot.unpin_chat_message(chat_id=chat_id, message_id=pinned_messages[chat_id]["message_id"])
+        await context.bot.unpin_chat_message(chat_id, pinned_messages[chat_id]["message_id"])
         del pinned_messages[chat_id]
     if chat_id in last_pinned_times:
         del last_pinned_times[chat_id]
         
     resp = await update.message.reply_text("Таймер сброшен, можно публиковать новую ЗЧ.")
-    context.job_queue.run_once(delete_system_message, 10, data=resp.message_id, chat_id=chat_id)
+    context.job_queue.run_once(
+        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=resp.message_id),
+        10
+    )
     await update.message.delete()
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Обработчики
+    # Регулярная очистка хранилища
+    job_queue = app.job_queue
+    job_queue.run_repeating(cleanup_storage, interval=60, first=10)
+    
     app.add_handler(CommandHandler("timer", reset_pin_timer))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
