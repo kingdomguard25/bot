@@ -111,6 +111,16 @@ async def unpin_message(context: CallbackContext):
             if chat_id in last_pinned_times:
                 del last_pinned_times[chat_id]
 
+async def check_pinned_message_exists(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    """Проверяет, существует ли закрепленное сообщение в чате"""
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        if chat.pinned_message and chat.pinned_message.message_id == pinned_messages.get(chat_id, {}).get("message_id"):
+            return True
+    except Exception as e:
+        logger.error(f"Ошибка при проверке закрепленного сообщения: {e}")
+    return False
+
 async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, text: str, is_edit: bool = False):
     current_time = time.time()
     message = update.message or update.edited_message
@@ -292,35 +302,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Проверка на ЗЧ
         if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
-            # Проверяем, есть ли уже активное закрепленное сообщение
-            if chat_id in pinned_messages:
-                last_pin_time = pinned_messages[chat_id]["timestamp"]
-                
-                # Если время не истекло
-                if current_time - last_pin_time < PINNED_DURATION:
-                    if await is_admin_or_musician(update, context):
-                        # Админ может заменить закреп
-                        await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
-                        correction = await context.bot.send_message(
-                            chat_id=chat_id,
-                            text="Корректировка звезды часа от Админа."
-                        )
-                        context.job_queue.run_once(
-                            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
-                            10
-                        )
-                    else:
-                        # Обычный пользователь - удаляем сообщение
-                        await process_duplicate_message(update, context, chat_id, user)
-                else:
-                    # Время истекло - можно закрепить новое
-                    await process_new_pinned_message(update, context, chat_id, user, text)
-            else:
-                # Нет активного закрепленного сообщения - закрепляем новое
+            # Проверяем, есть ли активное закрепленное сообщение
+            pinned_exists = await check_pinned_message_exists(context, chat_id)
+            
+            # Если сообщение было удалено или время истекло - разрешаем закрепление
+            if not pinned_exists or current_time - pinned_messages.get(chat_id, {}).get("timestamp", 0) >= PINNED_DURATION:
                 await process_new_pinned_message(update, context, chat_id, user, text)
+            else:
+                # Если время не истекло
+                if await is_admin_or_musician(update, context):
+                    # Админ может заменить закреп
+                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+                    correction = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Корректировка звезды часа от Админа."
+                    )
+                    context.job_queue.run_once(
+                        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
+                        10
+                    )
+                else:
+                    # Обычный пользователь - удаляем сообщение
+                    await process_duplicate_message(update, context, chat_id, user)
                 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
+
+async def handle_message_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик удаления сообщений"""
+    if update.message.left_chat_member or update.message.new_chat_members:
+        return
+        
+    chat_id = update.message.chat.id
+    if chat_id in pinned_messages and update.message.message_id == pinned_messages[chat_id]["message_id"]:
+        # Если удалено закрепленное сообщение - сбрасываем таймер
+        if chat_id in pinned_messages:
+            del pinned_messages[chat_id]
+        if chat_id in last_pinned_times:
+            del last_pinned_times[chat_id]
+        if chat_id in sent_photos:
+            try:
+                await context.bot.delete_message(chat_id, sent_photos[chat_id])
+            except Exception as e:
+                logger.error(f"Ошибка удаления фото: {e}")
+            del sent_photos[chat_id]
 
 async def basic_checks(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if not text:
@@ -404,6 +429,7 @@ def main():
     app.add_handler(CommandHandler("google", update_google_table))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
+    app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.MESSAGE & filters.Group.ChatType.GROUPS, handle_message_delete))
     
     app.run_polling()
     logger.info("Бот запущен")
