@@ -10,9 +10,7 @@ from telegram.ext import (
 )
 import logging
 import time
-import re
 import os
-from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(
@@ -31,23 +29,14 @@ ALLOWED_USER = "@Muzikant1429"
 # Антимат и антиспам настройки
 BANNED_WORDS = ["бляд", "хуй", "пизд", "наху", "гандон", "пидр", "пидорас", "пидар", "шалав", "шлюх", "мразь", "мразо", "ебат", "ебал", "дебил", "имебецил", "говнюк"]
 MESSENGER_KEYWORDS = ["t.me", "telegram", "whatsapp", "viber", "discord", "vk.com", "instagram", "facebook", "twitter", "youtube", "http", "www", ".com", ".ru", ".net", "tiktok"]
-SPAM_LIMIT = 4
-SPAM_INTERVAL = 30
-MUTE_DURATION = 900
 
 # Глобальные переменные для хранения данных
-active_users = {}  # {user_id: {"username": str, "delete_count": int, "timestamp": int}}
-pinned_stats = {}  # {user_id: {"username": str, "count": int, "last_message": str}}
-banned_users = set()  # {user_id}
-spammers = {}  # {user_id: {"count": int, "timestamp": int}}
 last_pinned_times = {}  # {chat_id: timestamp}
 last_user_username = {}  # {chat_id: username}
-last_zch_times = {}  # {chat_id: timestamp}
 last_thanks_times = {}  # {chat_id: timestamp}
 pinned_messages = {}  # {chat_id: {"message_id": int, "user_id": int}}
 message_history = {}  # {message_id: {"chat_id": int, "user_id": int, "text": str}}
 
-# Проверка прав администратора
 async def is_admin_or_musician(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     user_id = update.message.from_user.id
@@ -67,7 +56,6 @@ async def is_admin_or_musician(update: Update, context: ContextTypes.DEFAULT_TYP
 
     return False
 
-# Удаление системных сообщений
 async def delete_system_message(context: CallbackContext):
     job = context.job
     try:
@@ -75,7 +63,6 @@ async def delete_system_message(context: CallbackContext):
     except Exception as e:
         logger.error(f"Ошибка при удалении системного сообщения: {e}")
 
-# Открепление сообщения
 async def unpin_message(context: CallbackContext):
     job = context.job
     chat_id = job.chat_id
@@ -84,26 +71,18 @@ async def unpin_message(context: CallbackContext):
         try:
             await context.bot.unpin_chat_message(chat_id=chat_id, message_id=pinned_messages[chat_id]["message_id"])
             logger.info(f"Сообщение откреплено в чате {chat_id}")
-            
-            # Обновляем статистику
-            user_id = pinned_messages[chat_id]["user_id"]
-            if user_id in pinned_stats:
-                pinned_stats[user_id]["count"] -= 1
-                
             del pinned_messages[chat_id]
             if chat_id in last_pinned_times:
                 del last_pinned_times[chat_id]
-                
         except Exception as e:
             logger.error(f"Ошибка при откреплении: {e}")
 
-# Обработка нового сообщения "ЗЧ"
 async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, text: str):
     try:
         current_time = time.time()
         
         # Закрепляем сообщение
-        message = await update.message.pin()
+        await update.message.pin()
         
         # Сохраняем данные
         pinned_messages[chat_id] = {
@@ -113,12 +92,6 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
         
         last_pinned_times[chat_id] = current_time
         last_user_username[chat_id] = user.username or f"id{user.id}"
-        
-        # Обновляем статистику
-        if user.id not in pinned_stats:
-            pinned_stats[user.id] = {"username": user.username, "count": 0, "last_message": text}
-        pinned_stats[user.id]["count"] += 1
-        pinned_stats[user.id]["last_message"] = text
         
         # Сохраняем в историю сообщений
         message_history[update.message.message_id] = {
@@ -146,19 +119,12 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
     except Exception as e:
         logger.error(f"Ошибка при закреплении: {e}")
 
-# Обработка повторного сообщения "ЗЧ"
 async def process_duplicate_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user):
     try:
         current_time = time.time()
         
         # Удаляем дубликат
         await update.message.delete()
-        
-        # Обновляем статистику активных пользователей
-        if user.id not in active_users:
-            active_users[user.id] = {"username": user.username, "delete_count": 0, "timestamp": current_time}
-        active_users[user.id]["delete_count"] += 1
-        active_users[user.id]["timestamp"] = current_time
         
         # Отправляем благодарность (не чаще чем раз в 3 минуты)
         if current_time - last_thanks_times.get(chat_id, 0) > 180:
@@ -175,7 +141,6 @@ async def process_duplicate_message(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"Ошибка при обработке дубликата: {e}")
 
-# Обработка удаления сообщения
 async def handle_message_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.edited_message or not update.message:
         return
@@ -192,7 +157,6 @@ async def handle_message_deletion(update: Update, context: ContextTypes.DEFAULT_
                 
             logger.info(f"ЗЧ удалена пользователем, сброс таймера в чате {data['chat_id']}")
 
-# Обработка редактирования сообщения
 async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.edited_message:
         return
@@ -202,7 +166,6 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Полная повторная проверка отредактированного сообщения
         await handle_message(update, context)
 
-# Основной обработчик сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.message or update.edited_message
@@ -261,7 +224,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
 
-# Команда /timer - сброс таймера
 async def reset_pin_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin_or_musician(update, context):
         resp = await update.message.reply_text("У вас нет прав для этой команды.")
@@ -280,51 +242,11 @@ async def reset_pin_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.job_queue.run_once(delete_system_message, 10, data=resp.message_id, chat_id=chat_id)
     await update.message.delete()
 
-# Команда /lider - топ по ЗЧ
-async def lider(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    days = int(context.args[0]) if context.args else 1
-    cutoff = time.time() - days * 86400
-    
-    leaders = sorted(
-        [(uid, data) for uid, data in pinned_stats.items() if data.get("timestamp", float('inf')) >= cutoff],
-        key=lambda x: x[1]["count"],
-        reverse=True
-    )[:3]
-    
-    text = f"Топ участников за {days} д.:\n" + "\n".join(
-        f"{i+1}. @{data['username']} - {data['count']} 🌟" 
-        for i, (_, data) in enumerate(leaders)
-    
-    resp = await update.message.reply_text(text or "Нет данных")
-    context.job_queue.run_once(delete_system_message, 60, data=resp.message_id, chat_id=update.message.chat.id)
-    await update.message.delete()
-
-# Команда /active - самые активные
-async def active(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    days = int(context.args[0]) if context.args else 1
-    cutoff = time.time() - days * 86400
-    
-    active = sorted(
-        [(uid, data) for uid, data in active_users.items() if data["timestamp"] >= cutoff],
-        key=lambda x: x[1]["delete_count"],
-        reverse=True
-    )[:3]
-    
-    text = f"Самые активные за {days} д.:\n" + "\n".join(
-        f"{i+1}. @{data['username']} - {data['delete_count']} раз" 
-        for i, (_, data) in enumerate(active))
-    
-    resp = await update.message.reply_text(text or "Нет данных")
-    context.job_queue.run_once(delete_system_message, 60, data=resp.message_id, chat_id=update.message.chat.id)
-    await update.message.delete()
-
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Обработчики
     app.add_handler(CommandHandler("timer", reset_pin_timer))
-    app.add_handler(CommandHandler("lider", lider))
-    app.add_handler(CommandHandler("active", active))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.DELETED_MESSAGE, handle_message_deletion))
