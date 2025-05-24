@@ -6,6 +6,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     JobQueue,
+    CallbackQueryHandler,
     CallbackContext
 )
 import logging
