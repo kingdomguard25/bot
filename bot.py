@@ -38,7 +38,7 @@ ALLOWED_USER = "@Muzikant1429"
 ADMIN_GROUP_ID = -1002385047417  # ID админской группы
 # Добавляем в глобальные переменные
 REACTION_STATS = {}  # {user_id: {"username": str, "reactions": int}}
-TRACKED_CHAT_ID = TARGET_GROUP_ID  # Чат, где отслеживаем реакции
+TRACKED_CHAT_ID = -1002437528572  # Чат, где отслеживаем реакции
 
 # Антимат
 BANNED_WORDS = ["бляд", "хуй", "хер", "чмо", "пизд", "идиот", "хуев","наху", "гандон", "пидр", "пидор", "пидар", "шалав", "шлюх", "мраз", "мразо", "ебат", "ебал", "дебил", "имбецил", "говно"]
@@ -540,6 +540,7 @@ async def delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Новая функция для обработки реакций
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Получены данные реакции: {update.message_reaction}")
     try:
         reaction = update.message_reaction
         if not reaction:
@@ -576,6 +577,7 @@ async def clean_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 Статистика реакций очищена. Начинаем новый подсчет!")
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Запрос статистики. Текущие данные: {REACTION_STATS}")
     if not await is_admin_or_musician(update, context):
         await update.message.reply_text("❌ Эта команда только для администраторов")
         return
