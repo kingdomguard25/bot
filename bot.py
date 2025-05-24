@@ -291,7 +291,7 @@ async def lider(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reverse=True
     )[:3]
     
-    text = f"Топ участников за {days} д.:\n" + "\n".join(
+    text = f"Топ участников за {days} д.:\n" + "\n".join()
         f"{i+1}. @{data['username']} - {data['count']} 🌟" 
         for i, (_, data) in enumerate(leaders)
     
