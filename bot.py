@@ -39,10 +39,11 @@ MESSENGER_KEYWORDS = ["t.me", "telegram", "whatsapp", "viber", "discord", "vk.co
 last_pinned_times = {}
 last_user_username = {}
 last_thanks_times = {}
-pinned_messages = {}  # {chat_id: {"message_id": int, "user_id": int, "text": str, "timestamp": float}}
+pinned_messages = {}  # {chat_id: {"message_id": int, "user_id": int, "text": str, "timestamp": float, "photo_id": int}}
 message_storage = {}  # {message_id: {"chat_id": int, "user_id": int, "text": str, "timestamp": float}}
 STAR_MESSAGES = {}
 banned_users = set()
+sent_photos = {}  # {chat_id: message_id} для хранения ID отправленных фото
 
 def clean_text(text: str) -> str:
     return " ".join(text.split()).lower() if text else ""
@@ -92,7 +93,16 @@ async def unpin_message(context: CallbackContext):
     
     if chat_id in pinned_messages:
         try:
+            # Удаляем закрепленное сообщение
             await context.bot.unpin_chat_message(chat_id, pinned_messages[chat_id]["message_id"])
+            
+            # Удаляем связанное фото, если оно есть
+            if "photo_id" in pinned_messages[chat_id]:
+                try:
+                    await context.bot.delete_message(chat_id, pinned_messages[chat_id]["photo_id"])
+                except Exception as e:
+                    logger.error(f"Ошибка удаления фото: {e}")
+            
             logger.info(f"Сообщение откреплено в чате {chat_id}")
         except Exception as e:
             logger.error(f"Ошибка открепления: {e}")
@@ -100,44 +110,14 @@ async def unpin_message(context: CallbackContext):
             del pinned_messages[chat_id]
             if chat_id in last_pinned_times:
                 del last_pinned_times[chat_id]
+            if chat_id in sent_photos:
+                del sent_photos[chat_id]
 
 async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, text: str):
     current_time = time.time()
     message = update.message or update.edited_message
     
-    # Закрепляем сообщение
-    try:
-        await message.pin()
-    except Exception as e:
-        logger.error(f"Ошибка при закреплении: {e}")
-        return
-    
-    # Сохраняем данные
-    pinned_messages[chat_id] = {
-        "message_id": message.message_id,
-        "user_id": user.id,
-        "text": text,
-        "timestamp": current_time
-    }
-    message_storage[message.message_id] = {
-        "chat_id": chat_id,
-        "user_id": user.id,
-        "text": text,
-        "timestamp": current_time
-    }
-    
-    last_pinned_times[chat_id] = current_time
-    last_user_username[chat_id] = user.username or f"id{user.id}"
-    
-    # Устанавливаем таймер открепления
-    context.job_queue.run_once(unpin_message, PINNED_DURATION, chat_id=chat_id)
-    
-    # Для целевой группы - только закрепление
-    if chat_id == TARGET_GROUP_ID:
-        logger.info(f"ЗЧ в целевой группе от @{user.username}")
-        return
-    
-    # Проверяем Google таблицу для обычных групп
+    # Проверяем Google таблицу
     text_cleaned = clean_text(text)
     target_message = None
     for word in text_cleaned.split():
@@ -146,35 +126,112 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
             break
     
     try:
-        # Отправляем фото в текущую группу, если есть
+        # Удаляем старое фото, если оно есть
+        if chat_id in sent_photos:
+            try:
+                await context.bot.delete_message(chat_id, sent_photos[chat_id])
+                del sent_photos[chat_id]
+            except Exception as e:
+                logger.error(f"Ошибка удаления старого фото: {e}")
+        
+        # Отправляем новое фото, если есть в таблице
+        photo_message = None
         if target_message and target_message["photo"]:
-            await context.bot.send_photo(
+            photo_message = await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=target_message["photo"]
             )
+            sent_photos[chat_id] = photo_message.message_id
         
-        # Пересылаем в целевую группу только если там нет активной ЗЧ
-        target_has_active_pin = TARGET_GROUP_ID in pinned_messages and current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] < PINNED_DURATION
+        # Закрепляем текстовое сообщение
+        await message.pin()
         
+        # Сохраняем данные о закреплении
+        pinned_messages[chat_id] = {
+            "message_id": message.message_id,
+            "user_id": user.id,
+            "text": text,
+            "timestamp": current_time,
+            "photo_id": photo_message.message_id if photo_message else None
+        }
+        
+        last_pinned_times[chat_id] = current_time
+        last_user_username[chat_id] = user.username or f"id{user.id}"
+        
+        # Устанавливаем таймер открепления
+        context.job_queue.run_once(unpin_message, PINNED_DURATION, chat_id=chat_id)
+        
+        # Обработка для целевой группы
+        if chat_id == TARGET_GROUP_ID:
+            logger.info(f"ЗЧ в целевой группе от @{user.username}")
+            return
+        
+        # Если это обычная группа - обрабатываем пересылку в целевую
+        await process_target_group_forward(update, context, chat_id, user, text, target_message, current_time)
+                
+    except Exception as e:
+        logger.error(f"Ошибка обработки сообщения: {e}")
+
+async def process_target_group_forward(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                     source_chat_id: int, user, text: str, 
+                                     target_message: dict, current_time: float):
+    try:
+        # Проверяем, есть ли активное закрепленное сообщение в целевой группе
+        target_has_active_pin = (TARGET_GROUP_ID in pinned_messages and 
+                                current_time - pinned_messages[TARGET_GROUP_ID]["timestamp"] < PINNED_DURATION)
+        
+        # Если в целевой группе есть активная ЗЧ и она была переслана из этой группы
+        if target_has_active_pin:
+            source_message = pinned_messages[TARGET_GROUP_ID].get("source_chat_id")
+            if source_message == source_chat_id:
+                # Удаляем старую ЗЧ в целевой группе
+                await context.bot.unpin_chat_message(TARGET_GROUP_ID, pinned_messages[TARGET_GROUP_ID]["message_id"])
+                if "photo_id" in pinned_messages[TARGET_GROUP_ID]:
+                    await context.bot.delete_message(TARGET_GROUP_ID, pinned_messages[TARGET_GROUP_ID]["photo_id"])
+                del pinned_messages[TARGET_GROUP_ID]
+                target_has_active_pin = False
+        
+        # Если в целевой группе нет активной ЗЧ или она была удалена
         if not target_has_active_pin:
+            # Подготавливаем текст для пересылки
             forwarded_text = target_message["message"] if target_message else f"🌟 {text.replace('🌟', '').strip()}"
+            
+            # Отправляем сообщение в целевую группу
             forwarded = await context.bot.send_message(
                 chat_id=TARGET_GROUP_ID,
                 text=forwarded_text
             )
+            
+            # Закрепляем в целевой группе
             await forwarded.pin()
             
-            # Сохраняем данные о закреплении в целевой группе
+            # Сохраняем информацию о закреплении в целевой группе
             pinned_messages[TARGET_GROUP_ID] = {
                 "message_id": forwarded.message_id,
                 "user_id": user.id,
                 "text": forwarded_text,
-                "timestamp": current_time
+                "timestamp": current_time,
+                "source_chat_id": source_chat_id  # Сохраняем ID исходной группы
             }
+            
+            # Устанавливаем таймер открепления для целевой группы
             context.job_queue.run_once(unpin_message, PINNED_DURATION, chat_id=TARGET_GROUP_ID)
             
+            # Отправляем фото в целевую группу, если есть
+            if target_message and target_message["photo"]:
+                photo_message = await context.bot.send_photo(
+                    chat_id=TARGET_GROUP_ID,
+                    photo=target_message["photo"]
+                )
+                pinned_messages[TARGET_GROUP_ID]["photo_id"] = photo_message.message_id
+            
+            logger.info(f"Сообщение переслано и закреплено в целевой группе")
+            
     except Exception as e:
-        logger.error(f"Ошибка обработки сообщения: {e}")
+        logger.error(f"Ошибка при обработке целевой группы: {e}")
+
+# Остальные функции (process_duplicate_message, handle_message_edit, handle_message, 
+# basic_checks, reset_pin_timer, update_google_table, main) остаются без изменений
 
 async def process_duplicate_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user):
     current_time = time.time()
