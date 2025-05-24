@@ -491,6 +491,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Сообщение из неразрешенного чата {chat_id}")
         return
 
+    # Проверка текста сообщения
+    if text is None:
+        return
+
     # Антимат (ищет частичные совпадения)
     if text and any(bad_word in text.lower() for bad_word in BANNED_WORDS):
         await message.delete()
@@ -506,50 +510,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Проверка на спам (игнорируем для админов и музыканта)
-if not await is_admin_or_musician(update, context):
-    if user.id not in user_message_counts:
-        user_message_counts[user.id] = []
-    user_message_counts[user.id] = [t for t in user_message_counts[user.id] if current_time - t < SPAM_INTERVAL]
-    user_message_counts[user.id].append(current_time)
+    if not await is_admin_or_musician(update, context):
+        if user.id not in user_message_counts:
+            user_message_counts[user.id] = []
+        user_message_counts[user.id] = [t for t in user_message_counts[user.id] if current_time - t < SPAM_INTERVAL]
+        user_message_counts[user.id].append(current_time)
 
-    if len(user_message_counts[user.id]) > SPAM_LIMIT:
-        # Удаляем все сообщения пользователя
-        await delete_all_user_messages(context, user.id)
+        if len(user_message_counts[user.id]) > SPAM_LIMIT:
+            # Удаляем все сообщения пользователя
+            await delete_all_user_messages(context, user.id)
 
-        # Проверяем права администратора для мута
-        mute_status = False
-        try:
-            await context.bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=user.id,
-                permissions={"can_send_messages": False},
-                until_date=current_time + MUTE_DURATION
+            # Проверяем права администратора для мута
+            mute_status = False
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat_id,
+                    user_id=user.id,
+                    permissions={"can_send_messages": False},
+                    until_date=current_time + MUTE_DURATION
+                )
+                mute_status = True
+                logger.info(f"Пользователь {user.username or 'анонимный'} замучен на 15 минут в чате {chat_id}.")
+            except Exception as e:
+                logger.error(f"Ошибка при муте пользователя {user.id} в чате {chat_id}: {e}")
+
+            # Если мут не удался, добавляем пользователя в список для удаления сообщений
+            if not mute_status:
+                user_mute_times[user.id] = current_time + MUTE_DURATION
+                logger.info(f"Пользователь {user.username or 'анонимный'} добавлен в список для удаления сообщений на 15 минут.")
+
+            # Отправляем предупреждение
+            warning_text = (
+                f"{user.username or 'Уважаемый спамер'}, в связи с тем что вы захламляете группу, "
+                f"все ваши сообщения были удалены. Пожалуйста, соблюдайте правила общения."
             )
-            mute_status = True
-            logger.info(f"Пользователь {user.username or 'анонимный'} замучен на 15 минут в чате {chat_id}.")
-        except Exception as e:
-            logger.error(f"Ошибка при муте пользователя {user.id} в чате {chat_id}: {e}")
+            warning_message = await context.bot.send_message(chat_id=chat_id, text=warning_text)
+            logger.info(f"Отправлено предупреждение спамеру {user.username or 'анонимному'} в чате {chat_id}.")
 
-        # Если мут не удался, добавляем пользователя в список для удаления сообщений
-        if not mute_status:
-            user_mute_times[user.id] = current_time + MUTE_DURATION
-            logger.info(f"Пользователь {user.username or 'анонимный'} добавлен в список для удаления сообщений на 15 минут.")
+            # Удаляем предупреждение через 10 секунд
+            context.job_queue.run_once(delete_system_message, 10, data=warning_message.message_id, chat_id=chat_id)
 
-        # Отправляем предупреждение
-        warning_text = (
-            f"{user.username or 'Уважаемый спамер'}, в связи с тем что вы захламляете группу, "
-            f"все ваши сообщения были удалены. Пожалуйста, соблюдайте правила общения."
-        )
-        warning_message = await context.bot.send_message(chat_id=chat_id, text=warning_text)
-        logger.info(f"Отправлено предупреждение спамеру {user.username or 'анонимному'} в чате {chat_id}.")
+            # Очищаем счетчик сообщений спамера
+            user_message_counts[user.id].clear()
+            return
 
-        # Удаляем предупреждение через 10 секунд
-        context.job_queue.run_once(delete_system_message, 10, data=warning_message.message_id, chat_id=chat_id)
-
-        # Очищаем счетчик сообщений спамера
-        user_message_counts[user.id].clear()
-        return
-        
     # Обработка звезды часа
     if text and ("звезда" in text.lower() or "зч" in text.lower() or "🌟" in text):
         try:
