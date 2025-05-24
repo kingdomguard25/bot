@@ -10,6 +10,7 @@ from telegram.ext import (
 )
 import logging
 from telegram.ext import MessageReactionHandler  # Добавь в импорты в начале файла
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import time
 import os
 from bs4 import BeautifulSoup
@@ -582,10 +583,14 @@ async def clean_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin_or_musician(update, context):
-        await update.message.reply_text("❌ Только для администраторов")
+        await update.message.reply_text("❌ Эта команда только для администраторов")
+        return
+        
+    if not REACTION_STATS:
+        await update.message.reply_text("📊 Пока нет данных о реакциях")
         return
 
-    # Кнопки для выбора топа
+    # Создаем кнопки
     keyboard = [
         [InlineKeyboardButton("Топ 3", callback_data="top3")],
         [InlineKeyboardButton("Топ 10", callback_data="top10")],
@@ -671,7 +676,9 @@ def main():
     app.add_handler(MessageReactionHandler(handle_reaction))
     app.add_handler(CommandHandler("stat", show_stats))
     app.add_handler(CommandHandler("clean", clean_stats))
-    
+    app.add_handler(CallbackQueryHandler(stats_callback, pattern="^top"))
+    app.add_handler(CallbackQueryHandler(send_stats_callback, pattern="^send_"))
+
     app.run_polling()
     logger.info("Бот запущен")
 if __name__ == '__main__':
