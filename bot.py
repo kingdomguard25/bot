@@ -9,6 +9,7 @@ from telegram.ext import (
     CallbackContext
 )
 import logging
+from telegram.ext import MessageReactionHandler  # Добавь в импорты в начале файла
 import time
 import os
 from bs4 import BeautifulSoup
@@ -520,25 +521,25 @@ async def delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Новая функция для обработки реакций
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message_reaction:
+    reaction = update.message_reaction  # Получаем данные о реакции
+    if not reaction:
         return
         
-    chat_id = update.message_reaction.chat.id
-    if chat_id != TRACKED_CHAT_ID:
+    chat_id = reaction.chat.id
+    if chat_id != TRACKED_CHAT_ID:  # Проверяем, что реакция в нужном чате
         return
         
-    user = update.message_reaction.user
-    if user.is_bot:
+    user = reaction.user
+    if user.is_bot:  # Игнорируем ботов
         return
         
     user_id = user.id
     username = user.username or f"id{user_id}"
     
-    # Инициализируем запись о пользователе
+    # Обновляем статистику
     if user_id not in REACTION_STATS:
         REACTION_STATS[user_id] = {"username": username, "reactions": 0}
     
-    # Увеличиваем счетчик реакций
     REACTION_STATS[user_id]["reactions"] += 1
     logger.info(f"Реакция от @{username} (ID: {user_id})")
 
@@ -598,7 +599,7 @@ def main():
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
     # Добавляем новый обработчик для команды /del
     app.add_handler(CommandHandler("del", delete_message))
-    app.add_handler(MessageHandler(filters.REACTION, handle_reaction))
+    app.add_handler(MessageReactionHandler(handle_reaction))
     app.add_handler(CommandHandler("stat", show_stats))
     app.add_handler(CommandHandler("clean", clean_stats))
     
