@@ -26,10 +26,11 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HTML_URL = os.getenv("HTML_URL")
 TARGET_GROUP_ID = -1002437528572
-ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002382138419]
+ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
 PINNED_DURATION = 2700  # 45 минут
 MESSAGE_STORAGE_TIME = 180  # 3 минуты для хранения сообщений
 ALLOWED_USER = "@Muzikant1429"
+ADMIN_GROUP_ID = -1002385047417  # ID админской группы
 
 # Антимат
 BANNED_WORDS = ["бляд", "хуй", "пизд", "наху", "гандон", "пидр", "пидорас", "пидар", "шалав", "шлюх", "мразь", "мразо", "ебат", "ебал", "дебил", "имебецил", "говнюк"]
@@ -465,6 +466,56 @@ async def update_google_table(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     await update.message.delete()
 
+# Новая функция для сбора информации о пользователе
+async def get_user_info(user) -> str:
+    info = [
+        f"ID: {user.id}",
+        f"Username: @{user.username}" if user.username else "Username: Нет",
+        f"Имя: {user.first_name}" if user.first_name else "",
+        f"Фамилия: {user.last_name}" if user.last_name else "",
+        f"Язык: {user.language_code}" if user.language_code else ""
+    ]
+    return "\n".join(filter(None, info))
+
+# Новая команда /del
+async def delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin_or_musician(update, context):
+        await update.message.reply_text("❌ Эта команда только для администраторов")
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение, которое нужно удалить")
+        return
+
+    target_msg = update.message.reply_to_message
+    user = target_msg.from_user
+
+    try:
+        # Удаляем целевое сообщение
+        await target_msg.delete()
+        
+        # Удаляем команду /del
+        await update.message.delete()
+        
+        # Отправляем информацию в админскую группу
+        report_text = (
+            f"🚨 Сообщение удалено администратором @{update.effective_user.username}\n"
+            f"📌 Информация об авторе:\n"
+            f"{await get_user_info(user)}\n"
+            f"📝 Текст сообщения:\n"
+            f"{target_msg.text or target_msg.caption or 'Нет текста'}"
+        )
+        
+        await context.bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            text=report_text
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в команде /del: {e}")
+        await update.message.reply_text("❌ Не удалось удалить сообщение")
+
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -476,6 +527,8 @@ def main():
     app.add_handler(CommandHandler("google", update_google_table))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
+    # Добавляем новый обработчик для команды /del
+    app.add_handler(CommandHandler("del", delete_message))
     
     app.run_polling()
     logger.info("Бот запущен")
