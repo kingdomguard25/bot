@@ -273,7 +273,7 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Проверяем, что это закрепленное сообщение и пользователь является его автором
     if (chat_id in pinned_messages and 
         pinned_messages[chat_id]["message_id"] == edited_msg.message_id and
-        pinned_messages[chat_id]["user_id"] == user.id):
+        (pinned_messages[chat_id]["user_id"] == user.id or await is_admin_or_musician(update, context))):
         
         text = edited_msg.text or edited_msg.caption
         
@@ -285,52 +285,6 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # Обрабатываем как новое закрепленное сообщение
         await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        message = update.message or update.edited_message
-        if not message:
-            return
-            
-        user = message.from_user
-        chat_id = message.chat.id
-        text = message.text or message.caption
-        current_time = time.time()
-        
-        # Проверки на бан, разрешенные чаты, мат и рекламу
-        if (user.id in banned_users or 
-            chat_id not in ALLOWED_CHAT_IDS or
-            not await basic_checks(update, context, text)):
-            return
-
-        # Проверка на ЗЧ
-        if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
-            # Проверяем наличие активного закрепленного сообщения
-            chat = await context.bot.get_chat(chat_id)
-            has_active_pin = chat.pinned_message and chat.pinned_message.message_id == pinned_messages.get(chat_id, {}).get("message_id")
-            
-            # Если нет активного закрепленного сообщения или время истекло
-            if not has_active_pin or current_time - pinned_messages.get(chat_id, {}).get("timestamp", 0) >= PINNED_DURATION:
-                await process_new_pinned_message(update, context, chat_id, user, text)
-            else:
-                # Если время не истекло
-                if await is_admin_or_musician(update, context):
-                    # Админ может заменить закреп
-                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
-                    correction = await context.bot.send_message(
-                        chat_id=chat_id,
-                        text="Корректировка звезды часа от Админа."
-                    )
-                    context.job_queue.run_once(
-                        lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
-                        10
-                    )
-                else:
-                    # Обычный пользователь - удаляем сообщение
-                    await process_duplicate_message(update, context, chat_id, user)
-                
-    except Exception as e:
-        logger.error(f"Ошибка обработки сообщения: {e}")
 
 async def handle_message_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик удаления сообщений"""
@@ -358,6 +312,59 @@ async def handle_message_delete(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logger.error(f"Ошибка при удалении фото: {e}")
             del sent_photos[chat_id]
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        message = update.message or update.edited_message
+        if not message:
+            return
+            
+        user = message.from_user
+        chat_id = message.chat.id
+        text = message.text or message.caption
+        current_time = time.time()
+        
+        # Проверки на бан, разрешенные чаты, мат и рекламу
+        if (user.id in banned_users or 
+            chat_id not in ALLOWED_CHAT_IDS or
+            not await basic_checks(update, context, text)):
+            return
+
+        # Проверка на ЗЧ
+        if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
+            # Проверяем, есть ли активное закрепленное сообщение
+            if chat_id in pinned_messages:
+                last_pin_time = pinned_messages[chat_id]["timestamp"]
+                
+                # Если это редактирование своего сообщения - разрешаем
+                if update.edited_message and pinned_messages[chat_id]["user_id"] == user.id:
+                    await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+                # Если время не истекло
+                elif current_time - last_pin_time < PINNED_DURATION:
+                    if await is_admin_or_musician(update, context):
+                        # Админ может заменить закреп
+                        await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+                        correction = await context.bot.send_message(
+                            chat_id=chat_id,
+                            text="Корректировка звезды часа от Админа."
+                        )
+                        context.job_queue.run_once(
+                            lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=correction.message_id),
+                            10
+                        )
+                    else:
+                        # Обычный пользователь - удаляем сообщение
+                        await process_duplicate_message(update, context, chat_id, user)
+                else:
+                    # Время истекло - можно закрепить новое
+                    await process_new_pinned_message(update, context, chat_id, user, text)
+            else:
+                # Нет активного закрепленного сообщения - закрепляем новое
+                await process_new_pinned_message(update, context, chat_id, user, text)
+                
+    except Exception as e:
+        logger.error(f"Ошибка обработки сообщения: {e}")
+
 
 async def basic_checks(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if not text:
