@@ -247,6 +247,12 @@ async def process_target_group_forward(update: Update, context: ContextTypes.DEF
         logger.error(f"Ошибка при обработке целевой группы: {e}")
 
 async def process_duplicate_message(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user):
+    # Проверяем, не является ли это редактированием собственной ЗЧ
+    if (chat_id in pinned_messages and 
+        pinned_messages[chat_id]["user_id"] == user.id and
+        update.edited_message):
+        return
+        
     current_time = time.time()
     try:
         await update.message.delete()
@@ -272,13 +278,12 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
     edited_msg = update.edited_message
     chat_id = edited_msg.chat.id
     user = edited_msg.from_user
+    text = edited_msg.text or edited_msg.caption
     
     # Проверяем, что это закрепленное сообщение и пользователь является его автором
     if (chat_id in pinned_messages and 
         pinned_messages[chat_id]["message_id"] == edited_msg.message_id and
         (pinned_messages[chat_id]["user_id"] == user.id or await is_admin_or_musician(update, context))):
-        
-        text = edited_msg.text or edited_msg.caption
         
         # Проверки на бан, разрешенные чаты, мат и рекламу
         if (user.id in banned_users or 
@@ -288,6 +293,9 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # Обрабатываем как новое закрепленное сообщение
         await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+    # Добавляем обработку для случаев, когда пользователь редактирует свое сообщение с ЗЧ, но оно еще не закреплено
+    elif text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
+        await handle_message(update, context)
 
 async def handle_message_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик удаления сообщений"""
@@ -363,6 +371,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Проверка на ЗЧ
         if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
+    # Проверяем, является ли это редактированием собственной ЗЧ пользователя
+            if (chat_id in pinned_messages and 
+                pinned_messages[chat_id]["user_id"] == user.id and
+                (update.edited_message or (message.message_id == pinned_messages[chat_id]["message_id"]))):
+                # Это редактирование существующей ЗЧ - обновляем
+                await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
+                return
             # Получаем текущее закрепленное сообщение из чата
             try:
                 chat = await context.bot.get_chat(chat_id)
