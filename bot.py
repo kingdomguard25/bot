@@ -6,12 +6,9 @@ from telegram.ext import (
     filters,
     ContextTypes,
     JobQueue,
-    CallbackQueryHandler,
     CallbackContext
 )
 import logging
-from telegram.ext import MessageReactionHandler  # Добавь в импорты в начале файла
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import time
 import os
 from bs4 import BeautifulSoup
@@ -30,15 +27,12 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HTML_URL = os.getenv("HTML_URL")
-TARGET_GROUP_ID = -1002437528572
+TARGET_GROUP_ID = -1002385047417
 ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
 PINNED_DURATION = 2700  # 45 минут
 MESSAGE_STORAGE_TIME = 180  # 3 минуты для хранения сообщений
 ALLOWED_USER = "@Muzikant1429"
 ADMIN_GROUP_ID = -1002385047417  # ID админской группы
-# Добавляем в глобальные переменные
-REACTION_STATS = {}  # {user_id: {"username": str, "reactions": int}}
-TRACKED_CHAT_ID = -1002437528572  # Чат, где отслеживаем реакции
 
 # Антимат
 BANNED_WORDS = ["бляд", "хуй", "хер", "чмо", "пизд", "идиот", "хуев","наху", "гандон", "пидр", "пидор", "пидар", "шалав", "шлюх", "мраз", "мразо", "ебат", "ебал", "дебил", "имбецил", "говно"]
@@ -537,124 +531,7 @@ async def delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка в команде /del: {e}")
         await update.message.reply_text("❌ Не удалось удалить сообщение")
-
-# Новая функция для обработки реакций
-async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получены данные реакции: {update.message_reaction}")
-    try:
-        reaction = update.message_reaction
-        if not reaction:
-            return
-            
-        chat_id = reaction.chat.id
-        if chat_id != TRACKED_CHAT_ID:
-            return
-            
-        user = reaction.user
-        if user.is_bot:
-            return
-            
-        user_id = user.id
-        username = user.username or f"id{user_id}"
         
-        REACTION_STATS.setdefault(user_id, {"username": username, "reactions": 0})
-        REACTION_STATS[user_id]["reactions"] += 1
-        
-        logger.info(f"Новая реакция от @{username}. Всего: {REACTION_STATS[user_id]['reactions']}")
-        
-    except Exception as e:
-        logger.error(f"Ошибка обработки реакции: {e}")
-        
-# Команда /clean
-async def clean_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin_or_musician(update, context):
-        await update.message.reply_text("❌ Эта команда только для администраторов")
-        return
-        
-    global REACTION_STATS
-    REACTION_STATS = {}
-    
-    await update.message.reply_text("📊 Статистика реакций очищена. Начинаем новый подсчет!")
-
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Запрос статистики. Текущие данные: {REACTION_STATS}")
-    if not await is_admin_or_musician(update, context):
-        await update.message.reply_text("❌ Эта команда только для администраторов")
-        return
-        
-    if not REACTION_STATS:
-        await update.message.reply_text("📊 Пока нет данных о реакциях")
-        return
-
-    # Создаем кнопки
-    keyboard = [
-        [InlineKeyboardButton("Топ 3", callback_data="top3")],
-        [InlineKeyboardButton("Топ 10", callback_data="top10")],
-        [InlineKeyboardButton("Все", callback_data="topall")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "📊 Выберите вариант статистики:",
-        reply_markup=reply_markup
-    )
-
-async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    top_type = query.data
-    sorted_stats = sorted(REACTION_STATS.items(), key=lambda x: x[1]["reactions"], reverse=True)
-    
-    if top_type == "top3":
-        stats = sorted_stats[:3]
-    elif top_type == "top10":
-        stats = sorted_stats[:10]
-    else:
-        stats = sorted_stats
-    
-    stats_text = "🌟 Топ активных пользователей:\n\n" + "\n".join(
-        f"{i+1}. @{data['username']}: {data['reactions']} реакций"
-        for i, (_, data) in enumerate(stats)
-    )
-    
-    # Кнопки для выбора чата отправки
-    keyboard = [
-        [InlineKeyboardButton("Админам", callback_data=f"send_admin_{top_type}")],
-        [InlineKeyboardButton("В общий чат", callback_data=f"send_group_{top_type}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        f"{stats_text}\n\nКуда отправить?",
-        reply_markup=reply_markup
-    )
-
-async def send_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    action, top_type = query.data.split("_")
-    sorted_stats = sorted(REACTION_STATS.items(), key=lambda x: x[1]["reactions"], reverse=True)
-    
-    if top_type == "top3":
-        stats = sorted_stats[:3]
-    elif top_type == "top10":
-        stats = sorted_stats[:10]
-    else:
-        stats = sorted_stats
-    
-    stats_text = "🌟 Топ активных пользователей:\n\n" + "\n".join(
-        f"{i+1}. @{data['username']}: {data['reactions']} реакций"
-        for i, (_, data) in enumerate(stats)
-    )
-    
-    if action == "send_admin":
-        await context.bot.send_message(ADMIN_GROUP_ID, stats_text)
-    else:
-        await context.bot.send_message(TRACKED_CHAT_ID, stats_text)
-    
-    await query.edit_message_text("✅ Статистика отправлена")
     
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -670,10 +547,7 @@ def main():
     # Добавляем новый обработчик для команды /del
     app.add_handler(CommandHandler("del", delete_message))
     app.add_handler(MessageReactionHandler(handle_reaction))
-    app.add_handler(CommandHandler("stat", show_stats))
-    app.add_handler(CommandHandler("clean", clean_stats))
-    app.add_handler(CallbackQueryHandler(stats_callback, pattern="^top"))
-    app.add_handler(CallbackQueryHandler(send_stats_callback, pattern="^send_"))
+
 
     app.run_polling()
     logger.info("Бот запущен")
