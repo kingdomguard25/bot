@@ -546,7 +546,6 @@ def main():
     app.add_handler(MessageHandler(filters.ALL & filters.UpdateType.EDITED_MESSAGE, handle_message_edit))
     # Добавляем новый обработчик для команды /del
     app.add_handler(CommandHandler("del", delete_message))
-    app.add_handler(MessageReactionHandler(handle_reaction))
 
 
     app.run_polling()
