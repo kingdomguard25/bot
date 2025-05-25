@@ -99,20 +99,23 @@ async def unpin_message(context: CallbackContext):
             # Удаляем закрепленное сообщение
             await context.bot.unpin_chat_message(chat_id, pinned_messages[chat_id]["message_id"])
             logger.info(f"Сообщение откреплено в чате {chat_id}")
+
+            # Удаляем фото только если было редактирование или это админская корректировка
+            if pinned_messages[chat_id].get("was_edited", False):
+                if "photo_id" in pinned_messages[chat_id] and pinned_messages[chat_id]["photo_id"] == sent_photos.get(chat_id):
+                    try:
+                        await context.bot.delete_message(chat_id, pinned_messages[chat_id]["photo_id"])
+                        del sent_photos[chat_id]
+                        logger.info(f"Фото удалено в чате {chat_id} (было редактирование)")
+                    except Exception as e:
+                        logger.error(f"Ошибка удаления фото: {e}")
         except Exception as e:
             logger.error(f"Ошибка открепления: {e}")
         finally:
-            # Удаляем фото только если оно принадлежит этому сообщению
-            if "photo_id" in pinned_messages[chat_id] and pinned_messages[chat_id]["photo_id"] == sent_photos.get(chat_id):
-                try:
-                    await context.bot.delete_message(chat_id, pinned_messages[chat_id]["photo_id"])
-                    del sent_photos[chat_id]
-                except Exception as e:
-                    logger.error(f"Ошибка удаления фото: {e}")
-            
             del pinned_messages[chat_id]
             if chat_id in last_pinned_times:
                 del last_pinned_times[chat_id]
+            
 
 async def check_pinned_message_exists(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """Проверяет, существует ли закрепленное сообщение в чате"""
@@ -163,7 +166,8 @@ async def process_new_pinned_message(update: Update, context: ContextTypes.DEFAU
             "user_id": user.id,
             "text": text,
             "timestamp": current_time,
-            "photo_id": photo_message.message_id if photo_message else None
+            "photo_id": photo_message.message_id if photo_message else None,
+            "was_edited": is_edit  # Добавляем флаг редактирования
         }
         
         last_pinned_times[chat_id] = current_time
@@ -411,6 +415,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await process_new_pinned_message(update, context, chat_id, user, text)
             else:
                 if await is_admin_or_musician(update, context):
+                    pinned_messages[chat_id]["was_edited"] = True
                     await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
                     correction = await context.bot.send_message(
                         chat_id=chat_id,
