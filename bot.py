@@ -298,7 +298,7 @@ async def handle_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Обрабатываем как новое закрепленное сообщение
         await process_new_pinned_message(update, context, chat_id, user, text, is_edit=True)
     # Добавляем обработку для случаев, когда пользователь редактирует свое сообщение с ЗЧ, но оно еще не закреплено
-    elif text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
+    elif text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟", "⭐", "⭐️", "✮", "★"]):
         await handle_message(update, context)
 
 async def handle_message_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -374,7 +374,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Проверка на ЗЧ
-        if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟"]):
+        if text and any(marker in text.lower() for marker in ["звезда", "зч", "🌟", "⭐", "⭐️", "✮", "★"]):
     # Проверяем, является ли это редактированием собственной ЗЧ пользователя
             if (chat_id in pinned_messages and 
                 pinned_messages[chat_id]["user_id"] == user.id and
