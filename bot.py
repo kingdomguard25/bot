@@ -14,6 +14,8 @@ import os
 from bs4 import BeautifulSoup
 import requests
 from datetime import datetime
+import csv
+import io
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-HTML_URL = os.getenv("HTML_URL")
+CSV_URL = os.getenv("CSV_URL")
 TARGET_GROUP_ID = -1002437528572
 ALLOWED_CHAT_IDS = [-1002201488475, -1002437528572, -1002385047417, -1002382138419]
 PINNED_DURATION = 2700  # 45 минут
@@ -51,20 +53,37 @@ sent_photos = {}  # {chat_id: message_id} для хранения ID отпра�
 def clean_text(text: str) -> str:
     return " ".join(text.split()).lower() if text else ""
 
+
 def load_star_messages():
+    logger.info(f"Загружаем CSV с URL: {CSV_URL[:80]}...")
     try:
-        response = requests.get(HTML_URL)
+        # Используем CSV_URL вместо HTML_URL
+        response = requests.get(CSV_URL)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        return {
-            clean_text(row.find_all("td")[0].text.strip()): {
-                "message": row.find_all("td")[1].text.strip(),
-                "photo": row.find_all("td")[2].text.strip() if row.find_all("td")[2].text.strip().startswith("http") else None
-            }
-            for row in soup.find_all("tr")[1:] if len(row.find_all("td")) >= 3
-        }
+        
+        # Декодируем содержимое как UTF-8
+        content = response.content.decode('utf-8')
+        reader = csv.reader(io.StringIO(content))
+        rows = list(reader)
+        
+        if not rows or len(rows) < 2:
+            logger.warning("CSV-файл пуст или не содержит данных")
+            return {}
+        
+        result = {}
+        for row in rows[1:]:  # Пропускаем заголовок
+            if len(row) >= 3:
+                key = clean_text(row[0])
+                message = row[1]
+                photo = row[2] if row[2].startswith("http") else None
+                if key:  # Игнорируем пустые ключи
+                    result[key] = {"message": message, "photo": photo}
+            else:
+                logger.debug(f"Пропущена строка с недостаточным количеством колонок: {row}")
+        logger.info(f"Загружено {len(result)} записей из CSV")
+        return result
     except Exception as e:
-        logger.error(f"Ошибка загрузки Google таблицы: {e}")
+        logger.error(f"Ошибка загрузки CSV-таблицы: {e}")
         return {}
 
 STAR_MESSAGES = load_star_messages()
