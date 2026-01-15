@@ -453,29 +453,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def basic_checks(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if not text:
-        return False
-        
+        return True  # Пустой текст — пропускаем (например, фото без подписи)
+
     chat_id = update.effective_chat.id
+    user = update.effective_user
     text_lower = text.lower()
-    
-    if any(bad in text_lower for bad in BANNED_WORDS):
-        await update.message.delete()
+
+    # Проверяем, является ли пользователь админом или разрешённым юзером
+    is_authorized = await is_admin_or_musician(update, context)
+
+    # Антимат: блокируем ТОЛЬКО для неавторизованных
+    if not is_authorized and any(bad in text_lower for bad in BANNED_WORDS):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         warn = await context.bot.send_message(chat_id, "Использование мата запрещено!")
         context.job_queue.run_once(
             lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=warn.message_id),
             10
         )
         return False
-        
-    if any(adv in text_lower for adv in MESSENGER_KEYWORDS):
-        await update.message.delete()
+
+    # Антиреклама: блокируем ТОЛЬКО для неавторизованных
+    if not is_authorized and any(adv in text_lower for adv in MESSENGER_KEYWORDS):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         warn = await context.bot.send_message(chat_id, "Реклама запрещена!")
         context.job_queue.run_once(
             lambda ctx: ctx.bot.delete_message(chat_id=chat_id, message_id=warn.message_id),
             10
         )
         return False
-        
+
     return True
 
 async def reset_pin_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
